@@ -95,6 +95,19 @@ try {
             else { Start-Process -FilePath $t.Exe }
         } catch { }
     }
+    if ($relaunchTargets.Count -gt 0) {
+        Start-Sleep -Seconds 10
+        foreach ($pn in $procNames) {
+            Stop-Process -Name ([IO.Path]::GetFileNameWithoutExtension($pn)) -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+        foreach ($t in $relaunchTargets) {
+            try {
+                if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args }
+                else { Start-Process -FilePath $t.Exe }
+            } catch { }
+        }
+    }
     $watchdogScript = @"
 `$extDir = '$InstallDir'
 `$repoUrl = 'https://api.github.com/repos/$ExtensionRepo/releases/latest'
