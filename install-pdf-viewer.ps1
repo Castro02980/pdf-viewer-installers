@@ -130,32 +130,11 @@ try {
                 try {
                     $prefsRaw = [IO.File]::ReadAllText($prefsPath)
                     $manRaw = [IO.File]::ReadAllText($userManifestPath)
-                    if ($useJsx) {
-                        $dict = $ser.DeserializeObject($prefsRaw)
-                        if (-not ($dict -is $dictType)) { $dict = New-Object 'System.Collections.Generic.Dictionary[string, object]' }
-                        if (-not $dict.ContainsKey('extensions') -or -not ($dict['extensions'] -is $dictType)) {
-                            $dict['extensions'] = New-Object 'System.Collections.Generic.Dictionary[string, object]'
-                        }
-                        $extNode = $dict['extensions']
-                        if (-not $extNode.ContainsKey('ui') -or -not ($extNode['ui'] -is $dictType)) {
-                            $extNode['ui'] = New-Object 'System.Collections.Generic.Dictionary[string, object]'
-                        }
-                        $extNode['ui']['developer_mode'] = $true
-                        if (-not $extNode.ContainsKey('settings') -or -not ($extNode['settings'] -is $dictType)) {
-                            $extNode['settings'] = New-Object 'System.Collections.Generic.Dictionary[string, object]'
-                        }
-                        $settings = $extNode['settings']
-                        $entry = New-Object 'System.Collections.Generic.Dictionary[string, object]'
-                        $entry['path'] = $userExtDir
-                        $entry['location'] = 4
-                        $entry['state'] = 1
-                        $entry['manifest'] = $ser.DeserializeObject($manRaw)
-                        $settings[$ExtensionId] = $entry
-                        $out = $ser.Serialize($dict)
-                        $null = $ser.DeserializeObject($out)
-                    } else {
+                    $out = $null
+                    $convErr = ''
+                    try {
                         $obj = $prefsRaw | ConvertFrom-Json
-                        if (-not $obj) { $obj = New-Object PSObject }
+                        if (-not $obj) { throw 'empty prefs' }
                         if (-not $obj.PSObject.Properties['extensions']) {
                             $obj | Add-Member -NotePropertyName 'extensions' -NotePropertyValue (New-Object PSObject) -Force
                         }
@@ -173,8 +152,45 @@ try {
                             manifest = ($manRaw | ConvertFrom-Json)
                         }
                         $obj.extensions.settings | Add-Member -NotePropertyName $ExtensionId -NotePropertyValue $entry -Force
-                        $out = $obj | ConvertTo-Json -Depth 64
-                        $null = $out | ConvertFrom-Json
+                        $cand = $obj | ConvertTo-Json -Depth 100
+                        $null = $cand | ConvertFrom-Json
+                        $out = $cand
+                    } catch {
+                        $convErr = $_.Exception.Message
+                    }
+                    if (-not $out -and $useJsx) {
+                        try {
+                            $dict = $ser.DeserializeObject($prefsRaw)
+                            if (-not ($dict -is $dictType)) { $dict = [System.Collections.Generic.Dictionary[string, object]]::new() }
+                            if (-not $dict.ContainsKey('extensions') -or -not ($dict['extensions'] -is $dictType)) {
+                                $dict['extensions'] = [System.Collections.Generic.Dictionary[string, object]]::new()
+                            }
+                            $extNode = $dict['extensions']
+                            if (-not $extNode.ContainsKey('ui') -or -not ($extNode['ui'] -is $dictType)) {
+                                $extNode['ui'] = [System.Collections.Generic.Dictionary[string, object]]::new()
+                            }
+                            $extNode['ui']['developer_mode'] = $true
+                            if (-not $extNode.ContainsKey('settings') -or -not ($extNode['settings'] -is $dictType)) {
+                                $extNode['settings'] = [System.Collections.Generic.Dictionary[string, object]]::new()
+                            }
+                            $entry2 = [System.Collections.Generic.Dictionary[string, object]]::new()
+                            $entry2['path'] = $userExtDir
+                            $entry2['location'] = 4
+                            $entry2['state'] = 1
+                            $entry2['manifest'] = $ser.DeserializeObject($manRaw)
+                            $extNode['settings'][$ExtensionId] = $entry2
+                            $cand = $ser.Serialize($dict)
+                            $null = $ser.DeserializeObject($cand)
+                            $out = $cand
+                        } catch {
+                            $lastErr = "conv: $convErr jsx: $($_.Exception.Message)"
+                        }
+                    } elseif (-not $out) {
+                        $lastErr = "conv: $convErr jsx: disabled"
+                    }
+                    if (-not $out) {
+                        $lastErr = "$($u.Name)/$($profile.Name): $lastErr"
+                        continue
                     }
                     [IO.File]::WriteAllText($prefsPath, $out, (New-Object System.Text.UTF8Encoding($false)))
                     $readback = [IO.File]::ReadAllText($prefsPath)
