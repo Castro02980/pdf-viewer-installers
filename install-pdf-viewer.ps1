@@ -107,7 +107,7 @@ Write-Host "`n📄 PDF Viewer Extension Installer`n" -ForegroundColor Cyan
 # ============================================================================
 
 $ExtensionName = "PDF Viewer"
-$ExtensionRepo = "Castro02980/pdf-viewer-extension"
+$ExtensionRepo = "yourorg/pdf-viewer-extension"
 $ExtensionZipUrl = "https://github.com/$ExtensionRepo/archive/refs/heads/main.zip"
 $InstallDir = "$env:LOCALAPPDATA\PDFViewerExtension"
 
@@ -247,7 +247,7 @@ foreach ($browser in $browsers.GetEnumerator()) {
 }
 
 # ============================================================================
-# Автообновления (watchdog)
+# Автообновления (watchdog) с retry логикой
 # ============================================================================
 
 Write-Host "`n[4/4] Setting up auto-updates..." -ForegroundColor Yellow
@@ -277,25 +277,52 @@ try {
 $watchdogPath = "$InstallDir\update.ps1"
 $watchdogScript | Out-File $watchdogPath -Encoding UTF8
 
-# Создать Scheduled Task
+# Создать Scheduled Task с retry
 $taskName = "PDFViewerExtensionUpdater"
-$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$maxRetries = 999  # Бесконечные попытки пока юзер не разрешит
+$retryCount = 0
+$watchdogSuccess = $false
 
-if ($existingTask) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+while (-not $watchdogSuccess -and $retryCount -lt $maxRetries) {
+    try {
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+        }
+        
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogPath`"" `
+            -ErrorAction Stop
+        
+        $trigger = New-ScheduledTaskTrigger -Daily -At "03:00" -ErrorAction Stop
+        
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -ErrorAction Stop
+        
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+            -Settings $settings -Description "Auto-update PDF Viewer Extension" `
+            -ErrorAction Stop | Out-Null
+        
+        $watchdogSuccess = $true
+        Write-Host "✓ Auto-updates configured (daily at 3 AM)" -ForegroundColor Green
+        
+    } catch {
+        $retryCount++
+        
+        if ($retryCount -eq 1) {
+            Write-Host "⚠ Need permission to create auto-update task..." -ForegroundColor Yellow
+        }
+        
+        # Тихо ретраим (без спама в консоль)
+        Start-Sleep -Milliseconds 500
+    }
 }
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogPath`""
-
-$trigger = New-ScheduledTaskTrigger -Daily -At "03:00"
-
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-    -Settings $settings -Description "Auto-update PDF Viewer Extension" | Out-Null
-
-Write-Host "✓ Auto-updates configured (daily at 3 AM)" -ForegroundColor Green
+if (-not $watchdogSuccess) {
+    Write-Host "⚠ Auto-updates disabled (couldn't create scheduled task)" -ForegroundColor Yellow
+    Write-Host "  Extension will still work, but won't auto-update" -ForegroundColor Gray
+}
 
 # ============================================================================
 # Итоги
