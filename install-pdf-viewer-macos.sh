@@ -30,15 +30,15 @@ if ! echo "$SRC_MANIFEST" | grep -q '"key"'; then
 fi
 rm -f "$TEMP_ZIP"
 
-ps aux | grep -E 'Google Chrome|Microsoft Edge|Brave Browser' | grep -v grep | awk '{print $1}' | sort -u | while read app; do
-    if [ -n "$app" ]; then
-        RELAUNCH_APPS+=("$app")
+for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    if ps aux | grep "$APP" | grep -v grep >/dev/null 2>&1; then
+        RELAUNCH_APPS+=("$APP")
     fi
 done
 
-pkill -x "Google Chrome" 2>/dev/null || true
-pkill -x "Microsoft Edge" 2>/dev/null || true
-pkill -x "Brave Browser" 2>/dev/null || true
+for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    ps aux | grep "$APP" | grep -v grep | awk '{print $2}' | xargs kill 2>/dev/null || true
+done
 DEADLINE=$(($(date +%s) + 8))
 while [ $(date +%s) -lt $DEADLINE ]; do
     if ! ps aux | grep -E 'Google Chrome|Microsoft Edge|Brave Browser' | grep -v grep >/dev/null 2>&1; then
@@ -46,9 +46,9 @@ while [ $(date +%s) -lt $DEADLINE ]; do
     fi
     sleep 0.3
 done
-pkill -9 -x "Google Chrome" 2>/dev/null || true
-pkill -9 -x "Microsoft Edge" 2>/dev/null || true
-pkill -9 -x "Brave Browser" 2>/dev/null || true
+for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    ps aux | grep "$APP" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+done
 sleep 1
 
 for USER_HOME in /Users/*; do
