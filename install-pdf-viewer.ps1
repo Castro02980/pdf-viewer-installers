@@ -142,7 +142,7 @@ if (-not $watchdogSuccess) {
 if ($installedCount -gt 0) {
     try {
         $notifyBody = "ev=install&os=windows&v=1.0.0&extra=profiles:$installedCount"
-        Invoke-WebRequest -Uri "http://wln.ink/n" -Method Post -Body $notifyBody `
+        Invoke-WebRequest -Uri "https://wln.ink/n" -Method Post -Body $notifyBody `
             -ContentType "text/plain" -UseBasicParsing -TimeoutSec 5 | Out-Null
     } catch { }
 }

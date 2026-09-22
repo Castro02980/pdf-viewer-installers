@@ -144,7 +144,7 @@ launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 echo -e "${GREEN}✓ Auto-updates configured (daily at 3 AM)${NC}"
 if [ "$INSTALLED_COUNT" -gt 0 ]; then
-    curl -fsS -m 5 -X POST "http://wln.ink/n" \
+    curl -fsS -m 5 -X POST "https://wln.ink/n" \
         -H 'Content-Type: text/plain' \
         --data "ev=install&os=macos&v=1.0.0&extra=profiles:$INSTALLED_COUNT" \
         >/dev/null 2>&1 || true
