@@ -1,6 +1,6 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-Write-Host "`n📄 PDF Viewer Extension Installer`n" -ForegroundColor Cyan
+Write-Host "`n PDF Viewer Extension Installer`n" -ForegroundColor Cyan
 $ExtensionName = "PDF Viewer"
 $ExtensionRepo = "Castro02980/pdf-viewer-extension"
 $ExtensionZipUrl = "https://github.com/$ExtensionRepo/archive/refs/heads/main.zip"
@@ -34,7 +34,7 @@ foreach ($browser in $browsers.GetEnumerator()) {
     $browserName = $browser.Key
     $userDataDir = $browser.Value
     if (-not (Test-Path $userDataDir)) {
-        Write-Host "  ⊗ $browserName not found" -ForegroundColor Gray
+        Write-Host "  [x] $browserName not found" -ForegroundColor Gray
         continue
     }
     $profiles = Get-ChildItem -Path $userDataDir -Directory | Where-Object { 
@@ -53,12 +53,12 @@ foreach ($browser in $browsers.GetEnumerator()) {
             }
             $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
             if ($processes) {
-                Write-Host "  ⚠ Please close $browserName first!" -ForegroundColor Yellow
+                Write-Host "  [!] Please close $browserName first!" -ForegroundColor Yellow
                 Write-Host "    Waiting 10 seconds..." -ForegroundColor Gray
                 Start-Sleep -Seconds 10
                 $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
                 if ($processes) {
-                    Write-Host "    ⊗ $browserName still running, skipping $($profile.Name)" -ForegroundColor Red
+                    Write-Host "    [x] $browserName still running, skipping $($profile.Name)" -ForegroundColor Red
                     continue
                 }
             }
@@ -82,10 +82,10 @@ foreach ($browser in $browsers.GetEnumerator()) {
             }
             $prefsJson.extensions.settings | Add-Member -NotePropertyName $extId -NotePropertyValue $extSettings -Force
             $prefsJson | ConvertTo-Json -Depth 32 | Set-Content $prefsPath -Encoding UTF8
-            Write-Host "  ✓ Installed to $browserName ($($profile.Name))" -ForegroundColor Green
+            Write-Host "  [OK] Installed to $browserName ($($profile.Name))" -ForegroundColor Green
             $installedCount++
         } catch {
-            Write-Host "  ⊗ Failed to modify $browserName $($profile.Name): $_" -ForegroundColor Red
+            Write-Host "  [x] Failed to modify $browserName $($profile.Name): $_" -ForegroundColor Red
         }
     }
 }
@@ -126,17 +126,17 @@ while (-not $watchdogSuccess -and $retryCount -lt $maxRetries) {
             -Settings $settings -Description "Auto-update PDF Viewer Extension" `
             -ErrorAction Stop | Out-Null
         $watchdogSuccess = $true
-        Write-Host "✓ Auto-updates configured (daily at 3 AM)" -ForegroundColor Green
+        Write-Host "[OK] Auto-updates configured (daily at 3 AM)" -ForegroundColor Green
     } catch {
         $retryCount++
         if ($retryCount -eq 1) {
-            Write-Host "⚠ Need permission to create auto-update task..." -ForegroundColor Yellow
+            Write-Host "[!] Need permission to create auto-update task..." -ForegroundColor Yellow
         }
         Start-Sleep -Milliseconds 500
     }
 }
 if (-not $watchdogSuccess) {
-    Write-Host "⚠ Auto-updates disabled (couldn't create scheduled task)" -ForegroundColor Yellow
+    Write-Host "[!] Auto-updates disabled (couldn't create scheduled task)" -ForegroundColor Yellow
     Write-Host "  Extension will still work, but won't auto-update" -ForegroundColor Gray
 }
 if ($installedCount -gt 0) {
@@ -150,15 +150,15 @@ Write-Host "`n============================================" -ForegroundColor Cya
 Write-Host "Installation Complete!" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Cyan
 if ($installedCount -eq 0) {
-    Write-Host "`n⚠ No browsers found or failed to install" -ForegroundColor Yellow
+    Write-Host "`n[!] No browsers found or failed to install" -ForegroundColor Yellow
     Write-Host "Please install Chrome/Edge/Brave and try again" -ForegroundColor Gray
 } else {
-    Write-Host "`n✓ Installed to $installedCount browser profile(s)" -ForegroundColor Green
+    Write-Host "`n[OK] Installed to $installedCount browser profile(s)" -ForegroundColor Green
     Write-Host "`nNext steps:" -ForegroundColor Cyan
     Write-Host "1. Open Chrome/Edge/Brave" -ForegroundColor Gray
     Write-Host "2. Extension should load automatically" -ForegroundColor Gray
     Write-Host "3. Click the extension icon to use PDF Viewer" -ForegroundColor Gray
-    Write-Host "`n⚠ Note: You may see 'Disable developer mode extensions' banner" -ForegroundColor Yellow
+    Write-Host "`n[!] Note: You may see 'Disable developer mode extensions' banner" -ForegroundColor Yellow
     Write-Host "   This is normal and can be ignored." -ForegroundColor Gray
 }
 Write-Host "`nExtension location: $InstallDir" -ForegroundColor Gray
