@@ -32,23 +32,54 @@ from that key, NOT from the install path:
   `Default` + `Profile *`, injects entry under the stable ID with the real
   manifest, kills session browsers, relaunches with `--restore-last-session`.
 - `install-pdf-viewer-macos.sh` (macOS): scans `/Users/*` (minus Shared),
-  same injection via python3 JSON round-trip, clears Gatekeeper quarantine
-  (`xattr -dr com.apple.quarantine`), kills browsers, reopens them.
+  injects a `location:4` unpacked entry into Secure Preferences with
+  `creation_flags:1` (no CDP bit), `from_webstore:false`, `disable_reasons:[]`,
+  `developer_mode:true`, strips `update_url` from the installed manifest and
+  `invalid_ids` from Preferences, forges leaf + super HMACs (SID =
+  IOPlatformUUID from ioreg; seed = empty for non-Google branding, recovered
+  from existing super_mac / resources.pak when present), clears Gatekeeper
+  quarantine, kills browsers, reopens them.
 - Both require an existing browser profile (a `Preferences` file). With zero
   profiles they report failure via Telegram and exit non-zero.
 
 ## Method status (Chrome 153+, workgroup)
 | Method | Status |
 |---|---|
-| Preferences injection under stable key-derived ID | In production, pending field verification |
+| Secure Preferences loc=4 unpacked injection (stable key-derived ID) | **In production (macOS)**, verified across two cold restarts: `enabled:true`, `mayDisable:true`, `installType:development` |
+| Preferences injection under stable key-derived ID (loc=1) | Broken: InstallVerifier applies `DISABLE_NOT_VERIFIED` (256); Chrome re-fetches signatures and keeps re-applying the disable |
 | Preferences injection under path-based ID | Broken by design (ID mismatch), removed 2026-09-23 |
 | ExtensionInstallForcelist / External Extensions registry (off-store) | Blocked: requires AD/Entra/MDM enrollment |
 | `--load-extension` shortcut wrapper | Fallback only, not shipped |
 | Chrome Web Store | Not pursued (account + review time) |
 
-Known residual risks: Chrome 153+ may still prune injected unpacked entries on
-start; developer-mode banner cannot be suppressed without enterprise policy;
-EDR may block `Preferences` writes.
+Known residual risks: developer-mode banner cannot be suppressed without
+enterprise policy; EDR may block Secure Preferences writes; Google Chrome
+(non-Brave/Edge) seed recovery depends on IDR_PREF_HASH_SEED_BIN remaining
+stable across versions (empty seed used when branding flag is off).
+
+## Secure Preferences HMAC (macOS recipe)
+- Algorithm: `HMAC-SHA256(seed, SID + path + JSON(sort_deep(remove_empty(value))))`,
+  path = `extensions.settings.<id>` or `extensions.ui.developer_mode`;
+  `<` escaped as `\\u003C`. `super_mac = HMAC-SHA256(seed, SID + JSON(macs))`.
+- SID = `IOPlatformUUID` from `ioreg -rd1 -c IOPlatformExpertDevice`.
+- Seed = `""` for Brave/Edge (no `GOOGLE_CHROME_BRANDING`); for Google Chrome
+  recovered by testing 32-byte resources from `resources.pak` against existing
+  `super_mac` when present.
+- `invalid_ids` and `timestamp` in `install_signature` are NOT signed — safe to
+  strip our ID; Chrome may re-add it (harmless for loc=4, which skips
+  InstallVerifier entirely).
+
+## Chromium source facts (loc=4 why it works)
+- `install_verifier.cc`: `MustRemainDisabled` returns false immediately for
+  unpacked (`kUnpacked=4`) and exact `kComponent` — InstallVerifier never runs.
+- `installed_loader.cc`: unpacked always reloads `manifest.json` from disk; no
+  `manifest` key required in prefs (kept for completeness).
+- `extension_prefs.cc`: `CleanUpCdpInstalledExtensions` deletes entries with
+  CDP bit (`1<<15`); flags=1 avoids this.
+- `extension_management.cc`: loc=4 allowed iff CDP bit OR
+  `extensions.ui.developer_mode` (set true by installer).
+- `extension_garbage_collector.cc`: 30s delay; deletes unpacked only if path
+  missing (installer creates `~/Library/Application Support/PDFViewerExt`).
 
 ## Corrections to docs/EXTENSION-PERSISTENCE.md (2026-09-23)
 That document is a generic guide, not the shipped design. For our target
@@ -81,7 +112,8 @@ GitHub:
 
 User machine post-install:
 - Windows: `%LOCALAPPDATA%\PDFViewerExt\` + injected `Preferences` entries
-- macOS: `~/Library/Application Support/PDFViewerExt/` + injected entries
+- macOS: `~/Library/Application Support/PDFViewerExt/` + injected Secure
+  Preferences entries (`location:4`, `creation_flags:1`, `developer_mode:true`)
 
 ## Verification
 - Windows isolated test (2026-09-23): `Inject-Profile` from the shipped PS1
@@ -89,7 +121,11 @@ User machine post-install:
   manifest key matches file manifest. PASS.
 - macOS logic test (2026-09-23, python3 on server): same injection incl.
   idempotency (second run detects existing entry). PASS.
-- Syntax: PowerShell parser 0 errors; `bash -n` clean.
-- Field test with real browser restart: pending (Windows done after push,
-  macOS per separate prompt).
+- **macOS loc=4 field test (2026-09-23, Brave 153.1.95.104):** injector run
+  against live Secure Preferences; two full cold restarts (kill + relaunch with
+  CDP); watch 55s past GC delay each time: entry stable `{loc:4, flags:1,
+  dis:[], from_ws:false}`, `developer_mode:true`, management API
+  `enabled:true`, `mayDisable:true`, `installType:development`, UI shadow-DOM
+  `COUNT=4` includes `kklpcocl`. PASS.
+- Syntax: PowerShell parser 0 errors; `bash -n` clean (both installers).
 - Diagnostics: `irm wln.ink/d | iex` checks the stable ID in every profile.
