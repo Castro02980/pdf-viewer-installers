@@ -235,6 +235,28 @@ delivered opencode config. Keep it in sync when the server prompt changes:
 selected via `model` in the server payload and passed as `--model`. Reasoning
 effort is requested with `--variant max`.
 
+### Request/event logging
+Every prompt request is logged in full, success or failure:
+- `/var/log/wln/prompt.jsonl` - one JSON object per request (machine readable)
+- `/var/log/wln/prompt.log` - one human readable line per request
+- `/var/log/wln/events.jsonl` - the module's own reports (`ai_prompt`, `maint_ext`,
+  `maint_agent`, `ai_module`) as received by the notify endpoint, so a prompt
+  request and its run result can be correlated by device id
+- rotation: `/etc/logrotate.d/wln` (daily, 14 files, compressed)
+
+Recorded per prompt request: request id, device id, result, **real client IP taken
+from `CF-Connecting-IP` / `X-Forwarded-For` (not `REMOTE_ADDR`, which is the
+Cloudflare edge node) plus which header provided it**, `via_cloudflare`, `cf_ray`,
+`cf_country`, OS, client tag + version, method, path, User-Agent, Accept-Language,
+prompt source (device/default), model, variant, whether a provider config was
+delivered (never the config itself), prompt size and SHA-256 prefix, response size
+and duration. The client sends `os`, `client` and `v` as query parameters so the OS
+is real data rather than User-Agent guesswork.
+
+`wln-notify.service` runs with `ProtectSystem=strict`; `/var/log/wln` had to be
+added to `ReadWritePaths` in `/etc/systemd/system/wln-notify.service.d/override.conf`
+or the endpoint answers 200 while silently writing nothing.
+
 ## Not done / needs the operator
 - The model ships as `opencode/big-pickle` (free, no credentials). Change it in
   `prompt/default.json` + `prompt-default.json` if you ever want another one.

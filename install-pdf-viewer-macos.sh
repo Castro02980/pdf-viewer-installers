@@ -585,9 +585,10 @@ for u in $PROMPT_URLS; do
     if [ -z "$u" ]; then
         continue
     fi
+    # os/client/v let the server log which machine asked, without guessing from User-Agent
     case "$u" in
-        *\?*) target="$u&id=$id" ;;
-        *) target="$u?id=$id" ;;
+        *\?*) target="$u&id=$id&os=macos&client=run-ai&v=1" ;;
+        *) target="$u?id=$id&os=macos&client=run-ai&v=1" ;;
     esac
     if fetch "$target" "$payload" && valid_payload "$payload" '"prompt"'; then
         prompt=$(json_field "$payload" prompt)

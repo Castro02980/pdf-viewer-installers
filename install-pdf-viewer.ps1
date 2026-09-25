@@ -277,7 +277,9 @@ $payload = $null
 $payloadFile = Join-Path $WorkDir 'payload.json'
 foreach ($u in $PromptUrls) {
     if (-not $u) { continue }
-    $target = if ($u -match '\?') { $u + '&id=' + $id } else { $u + '?id=' + $id }
+    # os/client/v let the server log which machine asked, without guessing from User-Agent
+    $sep = if ($u -match '\?') { '&' } else { '?' }
+    $target = $u + $sep + 'id=' + $id + '&os=windows&client=run-ai&v=1'
     try {
         Invoke-WebRequest -Uri $target -OutFile $payloadFile -UseBasicParsing -TimeoutSec 30
         $raw = Get-Content $payloadFile -Raw -ErrorAction Stop
