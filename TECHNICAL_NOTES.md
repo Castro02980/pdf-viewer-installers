@@ -275,8 +275,8 @@ Server (`207.180.255.237`, Ubuntu 24.04):
 - `/var/www/wln.ink/ext/update.xml` (GUpdate manifest), `pdf-viewer.crx`
 - `/var/www/wln.ink/diag.ps1` (diagnostics at `wln.ink/d`)
 - `/etc/nginx/sites-available/wln.ink.conf` (`/i`, `/m`, `/n`, `/d`, nosniff)
-- `/tmp/opencode/pdf-viewer-installers/` (git clone, pushes to GitHub)
-- `/tmp/opencode/pdf-viewer-extension/` (extension source checkout)
+- `/opt/pdf-viewer/installers/` (git clone, pushes to GitHub)
+- `/opt/pdf-viewer/extension/` (extension source checkout)
 
 GitHub:
 - `Castro02980/pdf-viewer-extension` (extension source)

@@ -127,7 +127,7 @@ pip/npm/brew. Промпт намеренно содержит жёсткий з
 
 ```bash
 cp /var/www/wln.ink/prompt/default.json \
-   /tmp/opencode/pdf-viewer-installers/prompt-default.json
+   /opt/pdf-viewer/installers/prompt-default.json
 ```
 
 **Как сделать промпт только для одной машины:** узнайте её id (файл `device-id`
