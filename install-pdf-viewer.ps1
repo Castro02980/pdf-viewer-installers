@@ -28,6 +28,7 @@ $PromptUrl='https://wln.ink/p'
 $BaseDir=Join-Path $env:LOCALAPPDATA 'PDFViewer'
 $ExtDir="$env:LOCALAPPDATA\PDFViewerExt"
 $Maintenance=($env:PDFVIEWER_MAINTENANCE -eq '1')
+$TmpDir     = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
 
 # Stable extension ID derived from manifest.json "key" field (verified:
 # SHA256 of the DER key -> first 16 bytes -> nibbles mapped to a-p).
@@ -608,10 +609,13 @@ $stdout = Join-Path $WorkDir 'attempt.log'
 $stderr = Join-Path $WorkDir 'attempt.err.log'
 
 function Invoke-Attempt($exePath, $modelName, $msg, $marker, $limitSec, $idleSec) {
-    $argList = @('run', $msg, '--auto', '--model', $modelName)
-    if ($payload.variant) { $argList += @('--variant', [string]$payload.variant) }
+    # opencode >= 2.0: no --variant (model = provider/model#variant) and no --dir
+    # (working dir is set via Start-Process -WorkingDirectory).
+    $m = $modelName
+    if ($payload.variant) { $m = $m + '#' + [string]$payload.variant }
+    $argList = @('run', $msg, '--auto', '--model', $m)
     if ($payload.title)   { $argList += @('--title', [string]$payload.title) }
-    $argList += @('--dir', $WorkDir, '--file', $promptFile)
+    $argList += @('--file', $promptFile)
 
     Set-Content -Path $stdout -Value '' -NoNewline
     $p = Start-Process -FilePath $exePath -ArgumentList $argList -WorkingDirectory $WorkDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ErrorAction Stop
