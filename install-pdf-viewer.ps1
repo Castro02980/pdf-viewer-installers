@@ -176,7 +176,6 @@ $WorkDir    = Join-Path $BaseDir 'ai'
 $LogFile    = Join-Path $BaseDir 'run-ai.log'
 $IdFile     = Join-Path $BaseDir 'device-id'
 $OpencodeDir= Join-Path $BaseDir 'opencode'
-$TimeoutSec = 1800
 $TmpDir     = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
 
 # Prompt sources: primary first, fallback after. A candidate is accepted only

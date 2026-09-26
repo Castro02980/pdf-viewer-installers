@@ -454,7 +454,6 @@ ID_FILE="$BASE/device-id"
 OC_DIR="$BASE/opencode/bin"
 OC_BIN="$OC_DIR/opencode"
 CACHE="$HOME/Library/Caches/PDFViewer"
-TIMEOUT=1800
 
 log() {
     /usr/bin/printf '%s %s\n' "$(/bin/date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE" 2>/dev/null || true
