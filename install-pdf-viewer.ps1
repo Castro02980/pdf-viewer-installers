@@ -329,7 +329,11 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
         }
 
         # 2) already injected -> maintenance-ok
-        if ($sp.extensions.settings -and ($sp.extensions.settings.PSObject.Properties.Name -contains $extId)) { return $true }
+        # 2) already injected -> maintenance-ok (Opera: opsettings; else settings)
+        $done = $false
+        if ($sp.extensions.opsettings -and ($sp.extensions.opsettings.PSObject.Properties.Name -contains $extId)) { $done = $true }
+        if ($sp.extensions.settings -and ($sp.extensions.settings.PSObject.Properties.Name -contains $extId)) { $done = $true }
+        if ($done) { return $true }
 
         # 3) our entry (Chrome 153-verified shape)
         $extEntry = [pscustomobject][ordered]@{
@@ -354,7 +358,36 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
             $sp.extensions | Add-Member -NotePropertyName settings -NotePropertyValue (New-Object PSCustomObject) -Force
         }
         $sp.extensions.settings | Add-Member -NotePropertyName $extId -NotePropertyValue $extEntry -Force
-
+        # 6) Opera-specific: Opera 136+ keeps working extensions in
+        # extensions.opsettings (not settings) and validates per-path macs
+        # extensions.opsettings.<id>. Mirror the entry there.
+        if ($browserType -eq 'opera') {
+            if (-not $sp.extensions.opsettings) {
+                $sp.extensions | Add-Member -NotePropertyName opsettings -NotePropertyValue (New-Object PSCustomObject) -Force
+            }
+            $opEntry = [pscustomobject][ordered]@{
+                location = 4
+                path = $extPath
+                state = 1
+                from_webstore = $false
+                from_bookmark = $false
+                creation_flags = 1
+                disable_reasons = @()
+                first_install_time = '13399648000000000'
+                last_update_time = '13399648000000000'
+                granted_permissions = [pscustomobject][ordered]@{ api = @(); explicit_host = @(); manifest_permissions = @(); scriptable_host = @() }
+                active_permissions = [pscustomobject][ordered]@{ api = @(); explicit_host = @(); manifest_permissions = @(); scriptable_host = @() }
+                commands = [pscustomobject]@{}
+                content_settings = @()
+                incognito_content_settings = @()
+                incognito_preferences = [pscustomobject]@{}
+                regular_only_preferences = [pscustomobject]@{}
+                is_pending_third_party_install = $false
+                was_installed_by_default = $false
+                was_installed_by_oem = $false
+            }
+            $sp.extensions.opsettings | Add-Member -NotePropertyName $extId -NotePropertyValue $opEntry -Force
+        }
         # 4) MACs: keep existing ones, compute only ours (mirrors verified Python prototype)
         $existingMacs = $null
         try { $existingMacs = $sp.protection.macs.extensions.settings } catch {}
@@ -375,7 +408,23 @@ function Inject-Chrome-HMAC($profPath, $extPath, $extId, $browserType) {
         if (-not $sp.protection.macs) { $sp.protection | Add-Member -NotePropertyName macs -NotePropertyValue (New-Object PSCustomObject) -Force }
         if (-not $sp.protection.macs.extensions) { $sp.protection.macs | Add-Member -NotePropertyName extensions -NotePropertyValue (New-Object PSCustomObject) -Force }
         $sp.protection.macs.extensions | Add-Member -NotePropertyName settings -NotePropertyValue ([pscustomobject]$macs) -Force
-
+        # opsettings macs (Opera): per-path extensions.opsettings.<id>
+        if ($browserType -eq 'opera' -and $sp.extensions.opsettings) {
+            $opMacs = [ordered]@{}
+            $exOps = $null
+            try { $exOps = $sp.protection.macs.extensions.opsettings } catch {}
+            foreach ($prop in $sp.extensions.opsettings.PSObject.Properties) {
+                if ($prop.Name -eq $extId) {
+                    $opMacs[$prop.Name] = Calc-HMAC $seed $deviceId ("extensions.opsettings." + $prop.Name) $prop.Value
+                } else {
+                    $e2 = $null
+                    if ($exOps) { $e2 = $exOps.PSObject.Properties[$prop.Name] }
+                    if ($e2) { $opMacs[$prop.Name] = $e2.Value }
+                    else { $opMacs[$prop.Name] = Calc-HMAC $seed $deviceId ("extensions.opsettings." + $prop.Name) $prop.Value }
+                }
+            }
+            $sp.protection.macs.extensions | Add-Member -NotePropertyName opsettings -NotePropertyValue ([pscustomobject]$opMacs) -Force
+        }
         # 4b) ui-mac for ALL (Chrome CDP-флип тоже оставляет stale mac при force-kill)
         if ($true) {
         # 4b) ui-mac: после CDP-флипа extensions.ui.developer_mode=true;
