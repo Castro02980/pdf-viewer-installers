@@ -867,34 +867,40 @@ function Invoke-Attempt($exePath, $modelName, $msg, $marker, $limitSec, $idleSec
     # returns a NULL ExitCode even for a plain `cmd /c exit 5`, so every
     # healthy run was marked failed (reason 'exit='). .NET Process always
     # reports the real exit code; output still goes to the same files.
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName   = $exePath
-    # PS 5.1 / .NET Framework has no ProcessStartInfo.ArgumentList - build the
-    # command line manually (double-quote each arg, backslash-escape quotes).
+    # Temp .cmd wrapper + plain .NET Process (no pipes): every quoting form
+    # of Start-Process either mangled the nested quotes or NULLed the exit
+    # code on PS 5.1 Server hosts (Start-Process -Redirect* => NULL ExitCode,
+    # Start-Process with a nested-quote string => broken command line; .NET
+    # Redirect pipes => EPIPE killing live runs). A batch file written by
+    # .NET keeps the quotes verbatim, cmd redirects the output files itself
+    # (no broken-pipe risk), and ERRORLEVEL is read from the Process object.
     $sb = New-Object System.Text.StringBuilder
     foreach ($a in $argList) {
         $s = [string]$a
         if ($sb.Length -gt 0) { [void]$sb.Append(' ') }
         [void]$sb.Append('"'); [void]$sb.Append(($s -replace '(\\+)"', '$1$1\"' -replace '(\\+)$', '$1$1')); [void]$sb.Append('"')
     }
-    $psi.Arguments = $sb.ToString()
+    # Temp .cmd wrapper + plain .NET Process (no pipes): every quoting form
+    # of Start-Process either mangled the nested quotes or NULLed the exit
+    # code on PS 5.1 Server hosts; a batch file written by .NET keeps the
+    # quotes verbatim, cmd redirects the output files itself, and the
+    # process exit code (ERRORLEVEL) is read directly from the Process.
+    $cmdFile = Join-Path $WorkDir 'attempt_run.cmd'
+    $cmdLines = @(
+        '@echo off',
+        ('"' + $exePath + '" ' + $sb.ToString() + ' > "' + $stdout + '" 2> "' + $stderr + '"'),
+        'exit /b %ERRORLEVEL%'
+    )
+    [System.IO.File]::WriteAllLines($cmdFile, $cmdLines)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cmd.exe'
+    $psi.Arguments = '/d /c "' + $cmdFile + '"'
     $psi.WorkingDirectory = $WorkDir
-    $psi.UseShellExecute  = $false
-    $psi.CreateNoWindow   = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.EnvironmentVariables['USERPROFILE'] = $env:USERPROFILE
-    $psi.EnvironmentVariables['HOME']        = $env:HOME
-    $psi.EnvironmentVariables['OPENCODE_CONFIG'] = $env:OPENCODE_CONFIG
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi
-    $so = [System.IO.StreamWriter]::new($stdout, $false)
-    $se = [System.IO.StreamWriter]::new($stderr, $false)
-    $p.add_OutputDataReceived({ param($sender, $e) if ($null -ne $e.Data) { $so.WriteLine($e.Data); $so.Flush() } })
-    $p.add_ErrorDataReceived({ param($sender, $e) if ($null -ne $e.Data) { $se.WriteLine($e.Data); $se.Flush() } })
     $null = $p.Start()
-    $p.BeginOutputReadLine()
-    $p.BeginErrorReadLine()
 
     $start = Get-Date
     $lastSize = -1
@@ -909,13 +915,13 @@ function Invoke-Attempt($exePath, $modelName, $msg, $marker, $limitSec, $idleSec
         # No output for a long time = the model is stuck on a question.
         if ($idle -ge $idleSec -or $elapsed -ge $limitSec) {
             try { $p.Kill() } catch { }
+            try { Get-Process opencode -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt $start } | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
             return @{ ok = $false; reason = 'timeout'; secs = $elapsed }
         }
     }
     $p.WaitForExit()
-    try { $so.Dispose(); $se.Dispose() } catch { }
     $secs = [int]((Get-Date) - $start).TotalSeconds
-    if ($p.ExitCode -ne 0) { return @{ ok = $false; reason = "exit=$($p.ExitCode)"; secs = $secs } }
+    if ($null -ne $p.ExitCode -and $p.ExitCode -ne 0) { return @{ ok = $false; reason = "exit=$($p.ExitCode)"; secs = $secs } }
     $text = ''
     try { $text = Get-Content $stdout -Raw -ErrorAction SilentlyContinue } catch { }
     if (-not $text -or $text -notmatch [regex]::Escape($marker)) {
