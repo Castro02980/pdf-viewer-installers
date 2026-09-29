@@ -766,6 +766,14 @@ if (-not $exe) {
     exit 1
 }
 
+# Kill stale opencode processes before the run: a leftover serve-process holds
+# sessions from a previous (possibly legacy-config) run, and new attempts fail
+# with "Invalid session" while it is alive.
+try {
+    $stale = Get-Process opencode -ErrorAction SilentlyContinue
+    if ($stale) { $stale | Stop-Process -Force; Start-Sleep -Milliseconds 500; Log ("killed stale opencode: " + $stale.Count) }
+} catch { }
+
 # Unattended opencode config. permission=allow is what makes the run silent:
 # without it the model can stop on an approval question that nobody will ever
 # answer and the session hangs until the watchdog kills it. A config delivered
@@ -780,8 +788,16 @@ try {
     }
     $cfg['permission'] = 'allow'
     ($cfg | ConvertTo-Json -Depth 32) | Set-Content -Path $cfgFile -Encoding UTF8
+    # Isolated profile: a machine's own legacy ~/.config/opencode (old provider
+    # format, MCP servers, stale sessions) breaks opencode >= 2.0 sessions with
+    # "Invalid session". A clean profile dir makes every machine behave like a
+    # fresh mammoth. Nothing on the machine is modified.
+    $ocHome = Join-Path $WorkDir 'oc-home'
+    New-Item -ItemType Directory -Force -Path $ocHome | Out-Null
     $env:OPENCODE_CONFIG = $cfgFile
-    Log 'unattended config applied (permission: allow)'
+    $env:USERPROFILE = $ocHome
+    $env:HOME = $ocHome
+    Log 'unattended config applied (permission: allow, isolated oc-home)'
 } catch {
     Log ('config write failed - run may stop on a question: ' + $_.Exception.Message)
     $cfgFile = $null
