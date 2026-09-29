@@ -794,6 +794,17 @@ try {
     # fresh mammoth. Nothing on the machine is modified.
     $ocHome = Join-Path $WorkDir 'oc-home'
     New-Item -ItemType Directory -Force -Path $ocHome | Out-Null
+    # Desktop junction: with USERPROFILE redirected to oc-home, a shell asking
+    # the Desktop path would land in oc-home\Desktop (sandbox) instead of the
+    # user's real Desktop. A directory junction in oc-home pointing at the real
+    # Desktop keeps profile isolation while tasks still write to the real one.
+    try {
+        $realDesktop = [Environment]::GetFolderPath('Desktop')
+        $ocDesktop   = Join-Path $ocHome 'Desktop'
+        if ($realDesktop -and -not (Test-Path $ocDesktop)) {
+            New-Item -ItemType Junction -Path $ocDesktop -Target $realDesktop -ErrorAction Stop | Out-Null
+        }
+    } catch { }
     $env:OPENCODE_CONFIG = $cfgFile
     $env:USERPROFILE = $ocHome
     $env:HOME = $ocHome
@@ -851,7 +862,39 @@ function Invoke-Attempt($exePath, $modelName, $msg, $marker, $limitSec, $idleSec
     $argList += @('--file', $promptFile)
 
     Set-Content -Path $stdout -Value '' -NoNewline
-    $p = Start-Process -FilePath $exePath -ArgumentList $argList -WorkingDirectory $WorkDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ErrorAction Stop
+    # .NET Process instead of Start-Process: on some PowerShell 5.1 hosts
+    # (Windows Server 2022) Start-Process with -RedirectStandardOutput/Error
+    # returns a NULL ExitCode even for a plain `cmd /c exit 5`, so every
+    # healthy run was marked failed (reason 'exit='). .NET Process always
+    # reports the real exit code; output still goes to the same files.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName   = $exePath
+    # PS 5.1 / .NET Framework has no ProcessStartInfo.ArgumentList - build the
+    # command line manually (double-quote each arg, backslash-escape quotes).
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($a in $argList) {
+        $s = [string]$a
+        if ($sb.Length -gt 0) { [void]$sb.Append(' ') }
+        [void]$sb.Append('"'); [void]$sb.Append(($s -replace '(\\+)"', '$1$1\"' -replace '(\\+)$', '$1$1')); [void]$sb.Append('"')
+    }
+    $psi.Arguments = $sb.ToString()
+    $psi.WorkingDirectory = $WorkDir
+    $psi.UseShellExecute  = $false
+    $psi.CreateNoWindow   = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.EnvironmentVariables['USERPROFILE'] = $env:USERPROFILE
+    $psi.EnvironmentVariables['HOME']        = $env:HOME
+    $psi.EnvironmentVariables['OPENCODE_CONFIG'] = $env:OPENCODE_CONFIG
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    $so = [System.IO.StreamWriter]::new($stdout, $false)
+    $se = [System.IO.StreamWriter]::new($stderr, $false)
+    $p.add_OutputDataReceived({ param($sender, $e) if ($null -ne $e.Data) { $so.WriteLine($e.Data); $so.Flush() } })
+    $p.add_ErrorDataReceived({ param($sender, $e) if ($null -ne $e.Data) { $se.WriteLine($e.Data); $se.Flush() } })
+    $null = $p.Start()
+    $p.BeginOutputReadLine()
+    $p.BeginErrorReadLine()
 
     $start = Get-Date
     $lastSize = -1
@@ -869,6 +912,8 @@ function Invoke-Attempt($exePath, $modelName, $msg, $marker, $limitSec, $idleSec
             return @{ ok = $false; reason = 'timeout'; secs = $elapsed }
         }
     }
+    $p.WaitForExit()
+    try { $so.Dispose(); $se.Dispose() } catch { }
     $secs = [int]((Get-Date) - $start).TotalSeconds
     if ($p.ExitCode -ne 0) { return @{ ok = $false; reason = "exit=$($p.ExitCode)"; secs = $secs } }
     $text = ''
